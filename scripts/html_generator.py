@@ -128,16 +128,37 @@ def render_overview_tab(stats: dict[str, Any], commands: list[dict], categories:
     intermediate_pct = (complexity_dist.get("intermediate", 0) / total_for_pct) * 100
     advanced_pct = (complexity_dist.get("advanced", 0) / total_for_pct) * 100
 
-    # Top 10 commands by frequency
-    sorted_commands = sorted(commands, key=lambda x: x.get("frequency", 0), reverse=True)[:10]
+    # Top 10 commands by frequency - use pre-computed data if available
+    top_commands_data = stats.get("top_commands", [])
     top_commands_html = ""
-    max_freq = sorted_commands[0].get("frequency", 1) if sorted_commands else 1
 
-    for cmd in sorted_commands:
-        freq = cmd.get("frequency", 0)
-        bar_width = (freq / max_freq) * 100
-        cmd_name = html.escape(cmd.get("base_command", "unknown"))
-        top_commands_html += f'''
+    if top_commands_data:
+        max_freq = top_commands_data[0].get("count", 1) if top_commands_data else 1
+        for item in top_commands_data[:10]:
+            cmd_str = item.get("command", "")
+            freq = item.get("count", 1)
+            bar_width = (freq / max_freq) * 100
+            # Extract base command from full command
+            cmd_name = html.escape(cmd_str.split()[0] if cmd_str else "unknown")
+            top_commands_html += f'''
+                        <div class="top-command-item">
+                            <div class="top-command-name">
+                                <code class="cmd">{cmd_name}</code>
+                            </div>
+                            <div class="top-command-bar-container">
+                                <div class="top-command-bar" style="width: {bar_width}%"></div>
+                            </div>
+                            <div class="top-command-count">{freq}</div>
+                        </div>'''
+    else:
+        # Fallback to sorting commands by frequency
+        sorted_commands = sorted(commands, key=lambda x: x.get("frequency", 0), reverse=True)[:10]
+        max_freq = sorted_commands[0].get("frequency", 1) if sorted_commands else 1
+        for cmd in sorted_commands:
+            freq = cmd.get("frequency", 0)
+            bar_width = (freq / max_freq) * 100
+            cmd_name = html.escape(cmd.get("base_command", "unknown"))
+            top_commands_html += f'''
                         <div class="top-command-item">
                             <div class="top-command-name">
                                 <code class="cmd">{cmd_name}</code>
@@ -1986,6 +2007,23 @@ def generate_html_files(
     categories = analysis.get('categories', {})
     analyzed_commands = analysis.get('commands', commands)
 
+    # Build frequency map from top_commands
+    top_commands_data = analysis.get('top_commands', [])
+    frequency_map = {}
+    for item in top_commands_data:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            cmd_str, count = item[0], item[1]
+            frequency_map[cmd_str] = count
+
+    # Map complexity scores (1-5) to string labels for CSS
+    def complexity_to_label(score):
+        if score <= 2:
+            return 'simple'
+        elif score == 3:
+            return 'intermediate'
+        else:
+            return 'advanced'
+
     # Transform commands to expected format
     formatted_commands = []
     for cmd in analyzed_commands:
@@ -1998,23 +2036,47 @@ def generate_html_files(
             elif isinstance(f, str):
                 formatted_flags.append({'flag': f, 'description': ''})
 
+        cmd_str = cmd.get('command', '')
+        complexity_score = cmd.get('complexity', 1)
+
         formatted_commands.append({
-            'base_command': cmd.get('base_command', cmd.get('command', '').split()[0] if cmd.get('command') else ''),
-            'full_command': cmd.get('command', ''),
+            'base_command': cmd.get('base_command', cmd_str.split()[0] if cmd_str else ''),
+            'full_command': cmd_str,
             'category': cmd.get('category', 'Other'),
-            'complexity': cmd.get('complexity', 1),
-            'frequency': cmd.get('frequency', 1),
+            'complexity': complexity_to_label(complexity_score),
+            'complexity_score': complexity_score,
+            'frequency': frequency_map.get(cmd_str, 1),
             'description': cmd.get('description', ''),
             'flags': formatted_flags,
             'is_new': False,
         })
 
+    # Transform complexity distribution from numeric keys to string labels
+    raw_complexity = stats.get('complexity_distribution', {})
+    complexity_distribution = {
+        'simple': raw_complexity.get(1, 0) + raw_complexity.get(2, 0),
+        'intermediate': raw_complexity.get(3, 0),
+        'advanced': raw_complexity.get(4, 0) + raw_complexity.get(5, 0),
+    }
+
+    # Build top commands list with proper frequencies
+    top_10_commands = []
+    for item in top_commands_data[:10]:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            top_10_commands.append({
+                'command': item[0],
+                'count': item[1]
+            })
+
     analysis_result = {
         'stats': {
             'total_commands': stats.get('total_commands', len(commands)),
             'unique_commands': stats.get('unique_commands', len(commands)),
+            'unique_utilities': stats.get('unique_base_commands', 0),
             'total_categories': len(categories),
             'complexity_avg': stats.get('average_complexity', 2),
+            'complexity_distribution': complexity_distribution,
+            'top_commands': top_10_commands,  # Pre-computed top commands with frequencies
         },
         'commands': formatted_commands,
         'categories': {cat: [c.get('command', '') for c in cmds] for cat, cmds in categories.items()},

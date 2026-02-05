@@ -392,6 +392,170 @@ def _get_related_commands(cmd: str) -> list[str]:
     return []
 
 
+def _generate_bash_description(cmd_string: str) -> str:
+    """
+    Generate an educational description focusing on bash concepts.
+
+    Explains what each part of the command does from a bash perspective.
+    """
+    if not cmd_string:
+        return "Runs a command"
+
+    parts = []
+
+    # Check for command chaining
+    if ' && ' in cmd_string:
+        commands = cmd_string.split(' && ')
+        for i, cmd in enumerate(commands):
+            base = cmd.strip().split()[0] if cmd.strip() else ''
+            if i == 0:
+                parts.append(_describe_single_command(cmd.strip()))
+            else:
+                parts.append(f"then {_describe_single_command(cmd.strip())}")
+        return ', '.join(parts)
+
+    if ' || ' in cmd_string:
+        commands = cmd_string.split(' || ')
+        parts.append(_describe_single_command(commands[0].strip()))
+        parts.append(f"or if that fails, {_describe_single_command(commands[1].strip())}")
+        return ', '.join(parts)
+
+    if ' | ' in cmd_string:
+        commands = cmd_string.split(' | ')
+        parts.append(_describe_single_command(commands[0].strip()))
+        for cmd in commands[1:]:
+            parts.append(f"pipes output to {_describe_single_command(cmd.strip())}")
+        return ', '.join(parts)
+
+    return _describe_single_command(cmd_string)
+
+
+def _describe_single_command(cmd: str) -> str:
+    """Generate description for a single command (no pipes/chains)."""
+    if not cmd:
+        return "runs a command"
+
+    tokens = cmd.split()
+    base_cmd = tokens[0] if tokens else ''
+
+    # Common command descriptions with bash focus
+    descriptions = {
+        'cd': lambda args: f"changes directory to {args[0] if args else 'specified path'}",
+        'ls': lambda args: f"lists {'files in ' + args[0] if args else 'directory contents'}",
+        'mkdir': lambda args: f"creates directory {args[0] if args else ''}",
+        'rm': lambda args: f"removes {args[0] if args else 'files'}",
+        'cp': lambda args: f"copies files{' to ' + args[-1] if len(args) > 1 else ''}",
+        'mv': lambda args: f"moves/renames files{' to ' + args[-1] if len(args) > 1 else ''}",
+        'cat': lambda args: f"displays contents of {args[0] if args else 'file'}",
+        'echo': lambda args: f"prints {'text' if not args else repr(' '.join(args)[:30])}",
+        'grep': lambda args: f"searches for pattern in {'files' if len(args) > 1 else 'input'}",
+        'find': lambda args: f"finds files{' in ' + args[0] if args else ''} matching criteria",
+        'git': lambda args: f"runs git {args[0] if args else 'command'}" + _describe_git_subcommand(args),
+        'python': lambda args: "executes Python script" + (' from heredoc' if '<<' in cmd else ''),
+        'python3': lambda args: "executes Python 3 script" + (' from heredoc' if '<<' in cmd else ''),
+        'npm': lambda args: f"runs npm {args[0] if args else 'command'}",
+        'pip': lambda args: f"runs pip {args[0] if args else 'command'}",
+        'docker': lambda args: f"runs docker {args[0] if args else 'command'}",
+        'chmod': lambda args: f"changes permissions{' to ' + args[0] if args else ''}",
+        'chown': lambda args: "changes file ownership",
+        'curl': lambda args: "fetches URL content",
+        'wget': lambda args: "downloads file from URL",
+        'tar': lambda args: "archives/extracts tar files",
+        'ssh': lambda args: f"connects via SSH{' to ' + args[0] if args else ''}",
+        'sudo': lambda args: f"runs as superuser: {_describe_single_command(' '.join(args))}",
+        'export': lambda args: f"sets environment variable {args[0].split('=')[0] if args else ''}",
+        'source': lambda args: f"loads {args[0] if args else 'script'} into current shell",
+        '.': lambda args: f"loads {args[0] if args else 'script'} into current shell",
+        'touch': lambda args: f"creates/updates timestamp of {args[0] if args else 'file'}",
+        'head': lambda args: f"shows first lines of {args[-1] if args else 'file'}",
+        'tail': lambda args: f"shows last lines of {args[-1] if args else 'file'}",
+        'sort': lambda args: "sorts input lines",
+        'uniq': lambda args: "filters duplicate lines",
+        'wc': lambda args: "counts lines/words/bytes",
+        'awk': lambda args: "processes text with patterns",
+        'sed': lambda args: "transforms text with patterns",
+        'xargs': lambda args: "builds commands from input",
+        'tee': lambda args: "splits output to file and stdout",
+        'jq': lambda args: "processes JSON data",
+        'less': lambda args: f"pages through {args[0] if args else 'input'}",
+        'more': lambda args: f"pages through {args[0] if args else 'input'}",
+        'node': lambda args: "executes Node.js script",
+        'npx': lambda args: f"runs npm package {args[0] if args else 'command'}",
+        'make': lambda args: f"runs make {args[0] if args else 'target'}",
+        'cmake': lambda args: "configures CMake build",
+        'cargo': lambda args: f"runs Cargo {args[0] if args else 'command'}",
+        'rustc': lambda args: "compiles Rust code",
+        'go': lambda args: f"runs Go {args[0] if args else 'command'}",
+        'java': lambda args: "runs Java program",
+        'javac': lambda args: "compiles Java source",
+        'gcc': lambda args: "compiles C/C++ code",
+        'clang': lambda args: "compiles code with Clang",
+        'vim': lambda args: f"edits {args[0] if args else 'file'} in Vim",
+        'nano': lambda args: f"edits {args[0] if args else 'file'} in nano",
+        'emacs': lambda args: f"edits {args[0] if args else 'file'} in Emacs",
+        'which': lambda args: f"locates {args[0] if args else 'command'} executable",
+        'whereis': lambda args: f"finds {args[0] if args else 'command'} locations",
+        'man': lambda args: f"shows manual for {args[0] if args else 'command'}",
+        'pwd': lambda args: "prints current working directory",
+        'whoami': lambda args: "prints current username",
+        'date': lambda args: "displays current date/time",
+        'env': lambda args: "displays environment variables",
+        'set': lambda args: "sets shell options",
+        'unset': lambda args: f"removes variable {args[0] if args else ''}",
+        'read': lambda args: "reads input into variable",
+        'test': lambda args: "evaluates conditional expression",
+        '[': lambda args: "evaluates conditional expression",
+        'if': lambda args: "conditional statement",
+        'for': lambda args: "loop over items",
+        'while': lambda args: "loop while condition true",
+        'case': lambda args: "pattern matching statement",
+        'start': lambda args: f"opens {args[0] if args else 'file/URL'} (Windows)",
+        'open': lambda args: f"opens {args[0] if args else 'file/URL'} (macOS)",
+        'xdg-open': lambda args: f"opens {args[0] if args else 'file/URL'} (Linux)",
+        'code': lambda args: f"opens {args[0] if args else 'path'} in VS Code",
+        'claude': lambda args: f"runs Claude CLI {args[0] if args else 'command'}",
+    }
+
+    # Get args (skip flags)
+    args = [t for t in tokens[1:] if not t.startswith('-')]
+
+    if base_cmd in descriptions:
+        return descriptions[base_cmd](args)
+
+    # Default description
+    return f"executes {base_cmd} command"
+
+
+def _describe_git_subcommand(args: list) -> str:
+    """Describe git subcommands in detail."""
+    if not args:
+        return ""
+
+    subcommand = args[0]
+    git_descriptions = {
+        'init': ' to initialize a new repository',
+        'clone': ' to copy a remote repository',
+        'add': ' to stage changes',
+        'commit': ' to save staged changes',
+        'push': ' to upload commits to remote',
+        'pull': ' to download and merge remote changes',
+        'fetch': ' to download remote changes',
+        'merge': ' to combine branches',
+        'rebase': ' to replay commits on new base',
+        'checkout': ' to switch branches or restore files',
+        'branch': ' to manage branches',
+        'status': ' to show working tree status',
+        'log': ' to show commit history',
+        'diff': ' to show changes',
+        'stash': ' to temporarily store changes',
+        'reset': ' to undo changes',
+        'remote': ' to manage remote connections',
+        'tag': ' to manage tags',
+    }
+
+    return git_descriptions.get(subcommand, '')
+
+
 def _parse_command(cmd_string: str) -> dict:
     """Parse a command string into components."""
     parts = cmd_string.strip().split()
@@ -489,18 +653,23 @@ def generate_what_does_quiz(
     parsed = _parse_command(cmd_string)
     base_cmd = parsed["base"]
 
-    # Build the correct description
+    # Build the correct description using educational bash-focused generator
     correct_desc = description
     if not correct_desc:
-        # Generate from flags
+        # Use the educational bash description generator
+        correct_desc = _generate_bash_description(cmd_string)
+        # Capitalize first letter for consistent formatting
+        if correct_desc:
+            correct_desc = correct_desc[0].upper() + correct_desc[1:]
+
+        # Add flag details if available
         flag_descs = []
         for flag in parsed["flags"]:
             fd = _get_flag_description(base_cmd, flag)
             if fd:
-                flag_descs.append(fd)
-        correct_desc = f"Runs {base_cmd}"
+                flag_descs.append(f"{flag} ({fd.lower()})")
         if flag_descs:
-            correct_desc += " with: " + ", ".join(flag_descs)
+            correct_desc += " using " + ", ".join(flag_descs)
 
     # Generate distractors
     distractor_descriptions = _generate_distractor_descriptions(correct_desc, 3)
@@ -709,7 +878,14 @@ def generate_build_command_quiz(
 
     question_id = _generate_id(f"build_{cmd_string}")
 
-    task_description = intent if intent else f"perform the operation: {description}"
+    # Use educational bash description for task if no intent/description available
+    if intent:
+        task_description = intent
+    elif description:
+        task_description = description
+    else:
+        # Generate educational description from the command
+        task_description = _generate_bash_description(cmd_string)
 
     return QuizQuestion(
         id=question_id,
