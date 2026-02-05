@@ -108,11 +108,55 @@ ${colors.bright}SESSION LOCATION:${colors.reset}
 }
 
 /**
+ * Check if running in WSL
+ */
+function isWSL() {
+  try {
+    const version = fs.readFileSync('/proc/version', 'utf8').toLowerCase();
+    return version.includes('microsoft') || version.includes('wsl');
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
  * Get the Claude projects directory path
+ * Handles WSL by checking both Linux and Windows paths
  */
 function getClaudeProjectsDir() {
   const homeDir = os.homedir();
-  return path.join(homeDir, '.claude', 'projects');
+  const linuxPath = path.join(homeDir, '.claude', 'projects');
+
+  // Check if running in WSL
+  if (isWSL()) {
+    // Try Windows user directories
+    const windowsUsers = '/mnt/c/Users';
+    if (fs.existsSync(windowsUsers)) {
+      // Try current username first
+      const username = process.env.USER || '';
+      const windowsPath = path.join(windowsUsers, username, '.claude', 'projects');
+      if (fs.existsSync(windowsPath)) {
+        return windowsPath;
+      }
+
+      // Try to find any user with .claude folder
+      try {
+        const users = fs.readdirSync(windowsUsers, { withFileTypes: true });
+        for (const user of users) {
+          if (user.isDirectory() && !user.name.startsWith('Public') && !user.name.startsWith('Default')) {
+            const potentialPath = path.join(windowsUsers, user.name, '.claude', 'projects');
+            if (fs.existsSync(potentialPath)) {
+              return potentialPath;
+            }
+          }
+        }
+      } catch (e) {
+        // Ignore errors reading Windows users
+      }
+    }
+  }
+
+  return linuxPath;
 }
 
 /**
@@ -136,11 +180,17 @@ function listProjects() {
       const sessionsPath = path.join(projectPath, 'sessions');
       let sessionCount = 0;
 
+      // Check for sessions in sessions/ subdirectory (new structure)
       if (fs.existsSync(sessionsPath)) {
         const sessions = fs.readdirSync(sessionsPath)
           .filter(f => f.endsWith('.json') || f.endsWith('.jsonl'));
-        sessionCount = sessions.length;
+        sessionCount += sessions.length;
       }
+
+      // Also check for .jsonl files directly in project directory (old structure)
+      const directJsonl = fs.readdirSync(projectPath)
+        .filter(f => f.endsWith('.jsonl') && !f.startsWith('.'));
+      sessionCount += directJsonl.length;
 
       return {
         name: entry.name,

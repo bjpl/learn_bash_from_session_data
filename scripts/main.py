@@ -22,7 +22,48 @@ if sys.version_info < (3, 8):
 # Constants
 DEFAULT_OUTPUT_DIR = "./bash-learner-output/"
 MAX_UNIQUE_COMMANDS = 500
-SESSIONS_BASE_PATH = Path.home() / ".claude" / "projects"
+
+
+def get_sessions_base_path() -> Path:
+    """
+    Get the base path for Claude session files.
+
+    Handles WSL by checking both Linux and Windows paths.
+    """
+    # Standard Linux/Mac path
+    linux_path = Path.home() / ".claude" / "projects"
+
+    # Check if we're in WSL
+    is_wsl = False
+    try:
+        with open("/proc/version", "r") as f:
+            is_wsl = "microsoft" in f.read().lower() or "wsl" in f.read().lower()
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    if is_wsl:
+        # Try to find Windows user directory
+        # Check common Windows user paths via /mnt/c/Users/
+        windows_users = Path("/mnt/c/Users")
+        if windows_users.exists():
+            # Try current username first
+            username = os.environ.get("USER", "")
+            windows_path = windows_users / username / ".claude" / "projects"
+            if windows_path.exists():
+                return windows_path
+
+            # Try to find any user with .claude folder
+            for user_dir in windows_users.iterdir():
+                if user_dir.is_dir() and not user_dir.name.startswith(("Public", "Default")):
+                    potential_path = user_dir / ".claude" / "projects"
+                    if potential_path.exists():
+                        return potential_path
+
+    # Fall back to Linux path
+    return linux_path
+
+
+SESSIONS_BASE_PATH = get_sessions_base_path()
 
 
 def get_session_metadata(session_path: Path) -> Dict:
@@ -74,7 +115,8 @@ def format_file_size(size_bytes: int) -> str:
 
 def discover_sessions(
     project_filter: Optional[str] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    sessions_dir: Optional[Path] = None
 ) -> List[Dict]:
     """
     Discover available Claude session files.
@@ -82,25 +124,35 @@ def discover_sessions(
     Args:
         project_filter: Optional filter for project path substring
         limit: Maximum number of sessions to return
+        sessions_dir: Custom sessions directory (defaults to auto-detected)
 
     Returns:
         List of session metadata dictionaries, sorted by modification time (newest first)
     """
     sessions = []
+    base_path = sessions_dir or SESSIONS_BASE_PATH
 
-    if not SESSIONS_BASE_PATH.exists():
+    if not base_path.exists():
         return sessions
 
-    # Find all session files
-    for project_dir in SESSIONS_BASE_PATH.iterdir():
+    # Find all session files - check both old and new directory structures
+    # New structure: projects/<hash>/sessions/*.jsonl
+    # Old structure: projects/<hash>/*.jsonl
+    for project_dir in base_path.iterdir():
         if not project_dir.is_dir():
             continue
 
-        sessions_dir = project_dir / "sessions"
-        if not sessions_dir.exists():
-            continue
+        # Check for sessions subdirectory (new structure)
+        sessions_subdir = project_dir / "sessions"
+        if sessions_subdir.exists():
+            for session_file in sessions_subdir.glob("*.jsonl"):
+                metadata = get_session_metadata(session_file)
+                if project_filter and project_filter.lower() not in str(session_file).lower():
+                    continue
+                sessions.append(metadata)
 
-        for session_file in sessions_dir.glob("*.jsonl"):
+        # Also check for .jsonl files directly in project dir (old structure)
+        for session_file in project_dir.glob("*.jsonl"):
             metadata = get_session_metadata(session_file)
 
             # Apply project filter if specified
@@ -120,19 +172,23 @@ def discover_sessions(
     return sessions
 
 
-def list_sessions(project_filter: Optional[str] = None) -> None:
+def list_sessions(project_filter: Optional[str] = None, sessions_dir: Optional[Path] = None) -> None:
     """
     Display available sessions in a formatted table.
 
     Args:
         project_filter: Optional filter for project path substring
+        sessions_dir: Custom sessions directory
     """
-    sessions = discover_sessions(project_filter=project_filter)
+    base_path = sessions_dir or SESSIONS_BASE_PATH
+    sessions = discover_sessions(project_filter=project_filter, sessions_dir=sessions_dir)
 
     if not sessions:
         print("\nNo session files found.")
-        print(f"\nExpected location: {SESSIONS_BASE_PATH}/<project-hash>/sessions/*.jsonl")
+        print(f"\nSearched in: {base_path}")
+        print(f"\nExpected structure: <sessions-dir>/<project-hash>/*.jsonl")
         print("\nMake sure you have Claude session data available.")
+        print("\nTip: On WSL, try using -s /mnt/c/Users/<username>/.claude/projects/")
         return
 
     print(f"\n{'='*80}")
@@ -371,6 +427,12 @@ Examples:
         help='Enable verbose output'
     )
 
+    parser.add_argument(
+        '-s', '--sessions-dir',
+        type=str,
+        help=f'Sessions directory (default: auto-detected, currently {SESSIONS_BASE_PATH})'
+    )
+
     return parser.parse_args()
 
 
@@ -383,9 +445,12 @@ def main() -> int:
     """
     args = parse_arguments()
 
+    # Handle custom sessions directory
+    custom_sessions_dir = Path(args.sessions_dir) if args.sessions_dir else None
+
     # Handle --list
     if args.list:
-        list_sessions(project_filter=args.project)
+        list_sessions(project_filter=args.project, sessions_dir=custom_sessions_dir)
         return 0
 
     # Determine which sessions to process
@@ -404,16 +469,20 @@ def main() -> int:
 
     else:
         # Discover and select sessions
+        base_path = custom_sessions_dir or SESSIONS_BASE_PATH
         sessions = discover_sessions(
             project_filter=args.project,
-            limit=args.sessions
+            limit=args.sessions,
+            sessions_dir=custom_sessions_dir
         )
 
         if not sessions:
             print("\nNo session files found.")
-            print(f"\nExpected location: {SESSIONS_BASE_PATH}/<project-hash>/sessions/*.jsonl")
+            print(f"\nSearched in: {base_path}")
+            print(f"\nExpected structure: <sessions-dir>/<project-hash>/*.jsonl")
             print("\nTo create session data, use Claude Code and your sessions will be stored automatically.")
             print("\nUse --list to see available sessions once you have some.")
+            print("\nTip: On WSL, try using -s /mnt/c/Users/<username>/.claude/projects/")
             return 1
 
         sessions_to_process = sessions
