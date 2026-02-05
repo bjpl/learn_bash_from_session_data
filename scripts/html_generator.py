@@ -2007,13 +2007,17 @@ def generate_html_files(
     categories = analysis.get('categories', {})
     analyzed_commands = analysis.get('commands', commands)
 
-    # Build frequency map from top_commands
+    # Build frequency map from top_commands (full command strings)
     top_commands_data = analysis.get('top_commands', [])
     frequency_map = {}
     for item in top_commands_data:
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             cmd_str, count = item[0], item[1]
             frequency_map[cmd_str] = count
+
+    # Get base command frequency for the "Top 10 Most-Used Commands" chart
+    # This aggregates by base command (cd, git, mkdir) not full command strings
+    top_base_commands_data = analysis.get('top_base_commands', [])
 
     # Map complexity scores (1-5) to string labels for CSS
     def complexity_to_label(score):
@@ -2059,12 +2063,12 @@ def generate_html_files(
         'advanced': raw_complexity.get(4, 0) + raw_complexity.get(5, 0),
     }
 
-    # Build top commands list with proper frequencies
+    # Build top commands list with proper frequencies (by base command)
     top_10_commands = []
-    for item in top_commands_data[:10]:
+    for item in top_base_commands_data[:10]:
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             top_10_commands.append({
-                'command': item[0],
+                'command': item[0],  # base command like "cd", "git"
                 'count': item[1]
             })
 

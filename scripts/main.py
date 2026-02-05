@@ -20,8 +20,22 @@ if sys.version_info < (3, 8):
              f"{sys.version_info.major}.{sys.version_info.minor}")
 
 # Constants
-DEFAULT_OUTPUT_DIR = "./bash-learner-output/"
+DEFAULT_OUTPUT_BASE = "./bash-learner-output"
 MAX_UNIQUE_COMMANDS = 500
+
+
+def generate_timestamped_output_dir(base_dir: str = DEFAULT_OUTPUT_BASE) -> Path:
+    """
+    Generate a timestamped output directory.
+
+    Args:
+        base_dir: Base directory for outputs
+
+    Returns:
+        Path to timestamped output directory (e.g., ./bash-learner-output/run-2026-02-05-143052/)
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    return Path(base_dir) / f"run-{timestamp}"
 
 
 def get_sessions_base_path() -> Path:
@@ -305,8 +319,28 @@ def run_extraction_pipeline(
     parsed_commands = parse_commands(raw_commands)
     print(f"  -> Parsed {len(parsed_commands)} commands")
 
-    # Step 4: Deduplicate and cap
+    # Step 4: Count frequencies BEFORE deduplication
+    from collections import Counter
+    cmd_frequency = Counter()
+    base_cmd_frequency = Counter()
+    for cmd in parsed_commands:
+        cmd_str = cmd.get('command', '') or cmd.get('raw', '')
+        base_cmd = cmd.get('base_command', '')
+        if cmd_str:
+            cmd_frequency[cmd_str] += 1
+        if base_cmd:
+            base_cmd_frequency[base_cmd] += 1
+
+    # Step 5: Deduplicate and add frequency data
     unique_commands = deduplicate_commands(parsed_commands)
+
+    # Add frequency to each unique command
+    for cmd in unique_commands:
+        cmd_str = cmd.get('command', '') or cmd.get('raw', '')
+        base_cmd = cmd.get('base_command', '')
+        cmd['frequency'] = cmd_frequency.get(cmd_str, 1)
+        cmd['base_frequency'] = base_cmd_frequency.get(base_cmd, 1)
+
     if len(unique_commands) > MAX_UNIQUE_COMMANDS:
         print(f"\nCapping at {MAX_UNIQUE_COMMANDS} unique commands "
               f"(found {len(unique_commands)})")
@@ -314,9 +348,15 @@ def run_extraction_pipeline(
     else:
         print(f"\n{len(unique_commands)} unique commands")
 
-    # Step 5: Analyze commands
+    # Step 6: Analyze commands
     print("\nAnalyzing commands...")
     analysis = analyze_commands(unique_commands)
+
+    # Inject pre-computed frequency data into analysis
+    analysis['command_frequency'] = dict(cmd_frequency)
+    analysis['base_command_frequency'] = dict(base_cmd_frequency)
+    analysis['top_commands'] = cmd_frequency.most_common(20)
+    analysis['top_base_commands'] = base_cmd_frequency.most_common(20)
     print(f"  -> Generated analysis with {len(analysis.get('categories', {}))} categories")
 
     # Step 6: Generate quizzes
@@ -330,16 +370,41 @@ def run_extraction_pipeline(
     html_files = generate_html(unique_commands, analysis, quizzes, output_dir)
     print(f"  -> Created {len(html_files)} HTML files")
 
-    # Write summary JSON
+    # Write summary JSON with comprehensive metadata
     summary = {
-        "generated_at": datetime.now().isoformat(),
-        "sessions_processed": len(sessions),
-        "total_entries": len(all_entries),
-        "raw_commands": len(raw_commands),
-        "unique_commands": len(unique_commands),
-        "categories": list(analysis.get('categories', {}).keys()),
-        "quiz_count": quiz_count,
-        "html_files": [str(f) for f in html_files],
+        "metadata": {
+            "generated_at": datetime.now().isoformat(),
+            "run_id": output_dir.name,
+            "version": "1.0.3",
+        },
+        "input": {
+            "sessions_processed": len(sessions),
+            "session_files": [
+                {
+                    "filename": s['filename'],
+                    "path": str(s['path']),
+                    "size": s['size_human'],
+                    "modified": s['modified_str']
+                }
+                for s in sessions
+            ],
+            "total_entries": len(all_entries),
+        },
+        "analysis": {
+            "raw_commands_found": len(raw_commands),
+            "unique_commands": len(unique_commands),
+            "categories": list(analysis.get('categories', {}).keys()),
+            "category_counts": {cat: len(cmds) for cat, cmds in analysis.get('categories', {}).items()},
+            "top_base_commands": [
+                {"command": cmd, "count": count}
+                for cmd, count in list(base_cmd_frequency.most_common(10))
+            ],
+            "complexity_distribution": dict(analysis.get('complexity_distribution', {})),
+        },
+        "output": {
+            "quiz_questions": quiz_count,
+            "html_files": [str(f) for f in html_files],
+        },
     }
 
     summary_path = output_dir / "summary.json"
@@ -405,8 +470,8 @@ Examples:
     parser.add_argument(
         '-o', '--output',
         type=str,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f'Output directory (default: {DEFAULT_OUTPUT_DIR})'
+        default=None,
+        help=f'Output directory (default: timestamped folder in {DEFAULT_OUTPUT_BASE}/)'
     )
 
     parser.add_argument(
@@ -487,8 +552,11 @@ def main() -> int:
 
         sessions_to_process = sessions
 
-    # Run the pipeline
-    output_dir = Path(args.output)
+    # Run the pipeline with timestamped output directory
+    if args.output:
+        output_dir = Path(args.output)
+    else:
+        output_dir = generate_timestamped_output_dir()
     success, message = run_extraction_pipeline(sessions_to_process, output_dir)
 
     if success:
