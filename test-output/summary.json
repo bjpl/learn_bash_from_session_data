@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-02-05T12:20:42.607255",
+  "sessions_processed": 1,
+  "total_entries": 409,
+  "raw_commands": 37,
+  "unique_commands": 37,
+  "categories": [
+    "Unknown",
+    "Package Management",
+    "File System",
+    "Shell Builtins",
+    "Git",
+    "Process & System"
+  ],
+  "quiz_count": 18,
+  "html_files": [
+    "test-output/index.html"
+  ]
+}
