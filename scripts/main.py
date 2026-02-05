@@ -375,7 +375,7 @@ def run_extraction_pipeline(
         "metadata": {
             "generated_at": datetime.now().isoformat(),
             "run_id": output_dir.name,
-            "version": "1.0.3",
+            "version": "1.0.4",
         },
         "input": {
             "sessions_processed": len(sessions),

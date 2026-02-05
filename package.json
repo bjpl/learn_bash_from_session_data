@@ -1,6 +1,6 @@
 {
   "name": "learn_bash_from_session_data",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Learn bash from your Claude Code sessions - extracts commands and generates interactive HTML lessons",
   "main": "bin/learn-bash.js",
   "bin": {
