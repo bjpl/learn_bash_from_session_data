@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-02-05T20:03:03.825Z",
+  "projectRoot": "/mnt/c/Users/brand/Development/Project_Workspace/active-development/learn_bash_from_session_data",
+  "structure": {
+    "hasPackageJson": true,
+    "hasTsConfig": false,
+    "hasClaudeConfig": true,
+    "hasClaudeFlow": true
+  },
+  "scannedAt": 1770321783826
+}

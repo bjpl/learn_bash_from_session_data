@@ -1,0 +1,396 @@
+# PRD: `bash-learner` — Learn Bash from Your Claude Code Sessions
+
+## Overview
+
+An npm package that parses Claude Code session JSONL files, extracts all bash commands, and generates a self-contained HTML learning resource with command breakdowns, categorized lessons, and interactive quizzes. No LLM/AI integration — all content is rule-based.
+
+Follows the same architectural pattern as [`session-slides`](https://www.npmjs.com/package/session-slides): Python analysis scripts wrapped in a Node.js CLI, outputting self-contained HTML that opens in any browser.
+
+---
+
+## Core Workflow
+
+```
+User runs `bash-learner` in terminal
+  → CLI locates Claude Code session JSONL files (~/.claude/projects/)
+  → Parser extracts all bash tool_use blocks (command + description)
+  → Analyzer categorizes, deduplicates, scores complexity
+  → HTML generator builds self-contained learning resource
+  → Opens in default browser
+```
+
+---
+
+## CLI Interface
+
+### Installation
+```bash
+npm install -g bash-learner
+```
+
+### Usage
+```bash
+# Analyze most recent session (default)
+bash-learner
+
+# Analyze N most recent sessions
+bash-learner --sessions 5
+bash-learner -n 5
+
+# Specify a specific session file
+bash-learner --file ~/.claude/projects/.../session.jsonl
+
+# Specify output directory (default: ./bash-learner-output/)
+bash-learner --output ./my-lessons
+
+# List available sessions (for selection)
+bash-learner --list
+```
+
+### CLI Options
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--sessions` | `-n` | `1` | Number of most recent sessions to analyze |
+| `--file` | `-f` | — | Path to a specific JSONL session file |
+| `--output` | `-o` | `./bash-learner-output/` | Output directory for generated HTML |
+| `--list` | `-l` | — | List available sessions with metadata (date, project, command count) |
+| `--no-open` | — | `false` | Don't auto-open browser after generation |
+| `--project` | `-p` | — | Filter sessions by project directory path |
+
+---
+
+## Data Source: Claude Code Session JSONL
+
+### Location
+Session files are stored at:
+```
+~/.claude/projects/<project-path-hash>/sessions/<session-id>.jsonl
+```
+
+### Relevant JSONL Structure
+Each line is a JSON object. Bash commands appear as `tool_use` blocks:
+
+```jsonl
+{"type":"tool_use","name":"bash","input":{"command":"find . -name '*.ts' -not -path './node_modules/*' | head -20","description":"List all TypeScript files in the project"}}
+```
+
+**Fields to extract:**
+- `input.command` — the actual bash command string
+- `input.description` — Claude's intent/reasoning for running the command (this is pedagogically gold — it's the "why")
+
+**Also extract from tool_result blocks:**
+- `type: "tool_result"` with corresponding `tool_use_id` — the stdout/stderr output (useful for showing "what this command actually produced")
+
+### Session Metadata
+The JSONL file also contains metadata useful for context:
+- Session start/end timestamps
+- Project directory (from the file path hash or session metadata)
+- Total message count
+
+---
+
+## Analysis Engine (Python)
+
+### 1. Command Extraction
+- Parse JSONL, filter for `tool_use` where `name == "bash"`
+- Pair each command with its description and output (via `tool_use_id` → `tool_result` matching)
+- Preserve ordering (sequence matters for understanding workflows)
+
+### 2. Command Parsing
+For each raw command string, decompose into structured components:
+
+```python
+@dataclass
+class ParsedCommand:
+    raw: str                    # Original command string
+    description: str            # Claude's description of why it ran this
+    base_commands: list[str]    # e.g., ["find", "head"] for piped commands
+    flags: list[Flag]           # e.g., [Flag("-name", "'*.ts'"), Flag("--not-path", ...)]
+    pipes: list[str]            # Individual segments split on |
+    redirects: list[str]        # >, >>, 2>&1, etc.
+    subshells: list[str]        # $(...) or backtick expressions
+    variables: list[str]        # VAR=value assignments
+    logical_ops: list[str]      # &&, ||
+    output: str | None          # stdout from tool_result (truncated)
+    complexity_score: int       # 1-5 scale
+    category: str               # See categories below
+```
+
+**Parsing approach:** Use `shlex` for basic tokenization, then a state machine for pipe/redirect/subshell detection. Don't try to build a full bash AST — good-enough parsing that handles 90% of real-world commands is the goal.
+
+### 3. Complexity Scoring (1–5)
+
+| Score | Criteria | Example |
+|-------|----------|---------|
+| 1 | Single command, no flags | `ls`, `pwd`, `cd src` |
+| 2 | Single command with flags | `ls -la`, `grep -r "pattern" .` |
+| 3 | Pipes or redirects | `cat file \| grep pattern`, `echo "x" > file` |
+| 4 | Compound commands, subshells, loops | `find . -name "*.ts" \| xargs grep "import"` |
+| 5 | Complex pipelines, process substitution, multi-line | `diff <(curl -s url1) <(curl -s url2)` |
+
+### 4. Command Categories
+
+Each command is assigned a primary category based on its base command(s):
+
+| Category | Commands |
+|----------|----------|
+| **File System** | `ls`, `find`, `tree`, `du`, `df`, `stat`, `file`, `mkdir`, `rmdir`, `touch`, `rm`, `cp`, `mv`, `ln` |
+| **Text Processing** | `cat`, `grep`, `sed`, `awk`, `sort`, `uniq`, `wc`, `head`, `tail`, `cut`, `tr`, `diff`, `jq` |
+| **Git** | `git` (all subcommands) |
+| **Package Management** | `npm`, `npx`, `pip`, `apt`, `brew`, `cargo` |
+| **Process & System** | `ps`, `kill`, `top`, `htop`, `systemctl`, `env`, `export`, `which`, `whereis` |
+| **Networking** | `curl`, `wget`, `ssh`, `scp`, `ping`, `netstat`, `ss` |
+| **File Content** | `echo`, `printf`, `tee`, `read`, `cat` (when creating files) |
+| **Permissions** | `chmod`, `chown`, `chgrp`, `umask` |
+| **Compression** | `tar`, `gzip`, `zip`, `unzip` |
+| **Search & Navigation** | `find`, `locate`, `which`, `whereis`, `cd`, `pushd`, `popd` |
+| **Development** | `node`, `python`, `tsc`, `eslint`, `pytest`, `make` |
+| **Shell Builtins** | `alias`, `source`, `export`, `set`, `unset`, `test`, `[` |
+
+Commands that span multiple categories (e.g., `find . | grep`) get the category of the first/primary command.
+
+### 5. Deduplication & Frequency
+
+- **Exact dedup**: Remove identical command strings
+- **Fuzzy dedup**: Group commands that share the same structure but differ in arguments (e.g., `grep -r "foo" .` and `grep -r "bar" .` → one entry for `grep -r "<pattern>" <path>`)
+- **Frequency count**: Track how many times each command/pattern appears
+- **Unique base commands**: Count distinct utilities used (this becomes a stat)
+
+---
+
+## Content Generation (Rule-Based)
+
+### Command Explainer
+
+For each unique command/pattern, generate a structured breakdown:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ find . -name "*.ts" -not -path "./node_modules/*"   │
+│                                                     │
+│ WHY: List all TypeScript files in the project       │
+│                                                     │
+│ BREAKDOWN:                                          │
+│   find         → Search for files recursively       │
+│   .            → Starting from current directory    │
+│   -name "*.ts" → Match files ending in .ts          │
+│   -not         → Negate the next condition          │
+│   -path "..."  → Match against the full path        │
+│                                                     │
+│ CATEGORY: Search & Navigation                       │
+│ COMPLEXITY: ★★★☆☆                                   │
+│ FREQUENCY: Used 4 times in this session             │
+│                                                     │
+│ RELATED: ls, tree, grep -r                          │
+└─────────────────────────────────────────────────────┘
+```
+
+**Explainer data source**: A built-in knowledge base (JSON/Python dict) mapping:
+- ~100 common base commands → one-line descriptions
+- ~300 common flags → explanations (e.g., `grep -r` → "search recursively")
+- Common patterns → explanations (e.g., `2>&1` → "redirect stderr to stdout")
+- Pipe operator, redirects, logical operators → explanations
+
+This knowledge base is the core content engine and should be comprehensive. It's a static reference — no LLM needed. Structure it as:
+
+```python
+COMMAND_DB = {
+    "find": {
+        "description": "Search for files and directories recursively",
+        "man_url": "https://man7.org/linux/man-pages/man1/find.1.html",
+        "flags": {
+            "-name": "Match filename against a pattern",
+            "-type": "Filter by type (f=file, d=directory, l=symlink)",
+            "-path": "Match against the full path",
+            "-not": "Negate the next expression",
+            "-exec": "Run a command on each match",
+            "-maxdepth": "Limit search depth",
+            "-mtime": "Filter by modification time (days)",
+            ...
+        },
+        "common_patterns": [
+            {"pattern": "find . -name '*.ext'", "description": "Find all files with extension"},
+            {"pattern": "find . -type f | xargs grep", "description": "Search file contents"},
+        ]
+    },
+    ...
+}
+
+OPERATORS = {
+    "|": {"name": "Pipe", "description": "Send the output of the left command as input to the right command"},
+    ">": {"name": "Redirect (overwrite)", "description": "Write output to a file, replacing its contents"},
+    ">>": {"name": "Redirect (append)", "description": "Append output to a file"},
+    "2>&1": {"name": "Redirect stderr", "description": "Send error output to the same place as standard output"},
+    "&&": {"name": "AND", "description": "Run the next command only if the previous one succeeded (exit code 0)"},
+    "||": {"name": "OR", "description": "Run the next command only if the previous one failed (non-zero exit code)"},
+    "$()": {"name": "Command substitution", "description": "Run the enclosed command and substitute its output"},
+    ...
+}
+```
+
+### Category Lessons
+
+Group commands by category and present as a lesson page:
+
+- **Lesson title**: e.g., "Text Processing — Commands You Used"
+- **Commands in this category**: Listed by frequency, each with its explainer
+- **Concepts introduced**: Pipes, redirects, flags common to this category
+- **Your usage patterns**: "You used `grep` 12 times, mostly with `-r` (recursive) and `-n` (line numbers)"
+
+### Quiz / Exercise Generation
+
+Rule-based quiz types:
+
+1. **"What does this do?"** — Show a command from their session, 4 multiple-choice answers
+   - Correct answer derived from the description + command breakdown
+   - Distractors generated by swapping flags or changing the operation (e.g., "deletes files" vs "lists files")
+
+2. **"Which flag?"** — "You want to search recursively with grep. Which flag do you need?"
+   - Pull from the flag database for commands they actually used
+
+3. **"Build the command"** — Given the description (from Claude's intent), select/order the correct components
+   - "Find all Python files modified in the last 7 days" → drag/arrange `find`, `.`, `-name`, `"*.py"`, `-mtime`, `-7`
+
+4. **"Spot the difference"** — Two similar commands, explain what's different
+   - e.g., `grep -r "pattern" .` vs `grep -rn "pattern" .` → "The second adds line numbers"
+
+**Quiz generation rules:**
+- Only generate quizzes for commands with complexity ≥ 2
+- Weight toward high-frequency commands (you should know what you use most)
+- Distractors come from the same category (plausible wrong answers)
+- Each quiz has exactly 4 options
+
+---
+
+## HTML Output
+
+### Architecture
+Single self-contained HTML file (like session-slides). All CSS and JS inline. No external dependencies.
+
+### Page Structure (Tabbed Navigation)
+
+```
+┌──────────────────────────────────────────────────────┐
+│  🐚 Bash Learner                    Session: Jan 31  │
+├──────────┬───────────┬──────────┬────────────────────┤
+│ Overview │ Commands  │ Lessons  │ Quiz               │
+├──────────┴───────────┴──────────┴────────────────────┤
+│                                                      │
+│  [Tab content renders here]                          │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+```
+
+### Tab 1: Overview (Dashboard)
+- **Session stats**: Total commands, unique commands, unique base utilities, date range
+- **Complexity distribution**: Visual bar chart (how many commands at each complexity level)
+- **Category breakdown**: Pie/donut chart showing command distribution across categories
+- **Top 10 most-used commands**: Ranked list with frequency counts
+- **New commands**: Commands that appear for the first time (if analyzing multiple sessions — compare against prior sessions in scope)
+
+### Tab 2: Commands (Reference)
+- Filterable/searchable list of all unique commands
+- Sort by: frequency, complexity, category, alphabetical
+- Click any command to expand its full explainer (breakdown, flags, description, output preview)
+- Category filter chips at the top
+
+### Tab 3: Lessons (Categorized)
+- One section per category (only categories with ≥ 1 command)
+- Categories sorted by command count (most-used first)
+- Each section contains:
+  - Concept overview (static content from knowledge base)
+  - Commands you used in this category with explainers
+  - Key patterns and idioms observed in your usage
+
+### Tab 4: Quiz
+- Generates N quizzes based on session content (aim for 15-20 questions)
+- Mix of quiz types (see Quiz section above)
+- Client-side scoring — answer tracking in JS, show results at end
+- "Try Again" button to regenerate with different random seed
+- Show correct answer + explanation after each question
+
+### Visual Design
+- Clean, modern, dark/light mode toggle (default: light)
+- Syntax highlighting for all command displays (use a simple inline highlighter — color code: commands=blue, flags=green, strings=orange, operators=purple, paths=gray)
+- Responsive but optimized for desktop (this is a dev tool)
+- Keyboard navigation between tabs (1-4 keys)
+- Print-friendly styles
+
+---
+
+## Project Structure
+
+```
+bash-learner/
+├── bin/
+│   └── bash-learner.js          # CLI entry point (Node.js)
+├── scripts/
+│   ├── __init__.py
+│   ├── extractor.py             # JSONL parsing, command extraction
+│   ├── parser.py                # Command string → ParsedCommand
+│   ├── analyzer.py              # Categorization, complexity scoring, dedup
+│   ├── quiz_generator.py        # Rule-based quiz creation
+│   ├── html_generator.py        # Assemble final HTML output
+│   └── knowledge_base.py        # COMMAND_DB, OPERATORS, flag definitions
+├── package.json
+├── README.md
+└── LICENSE
+```
+
+### Technology Choices
+- **CLI**: Node.js (bin entry point, argument parsing with `minimist` or `commander`)
+- **Analysis**: Python 3.8+ (same pattern as session-slides)
+  - `shlex` for command tokenization
+  - `json` for JSONL parsing
+  - Standard library only — no pip dependencies
+- **Output**: Self-contained HTML with inline CSS/JS
+- **No external runtime dependencies** (Python is assumed present, as with session-slides)
+
+---
+
+## Knowledge Base Scope (v1)
+
+The knowledge base should cover at minimum:
+
+- **Base commands**: ~100 commands with descriptions and man page URLs
+- **Flags**: ~300 flag definitions across those commands (focus on the most common)
+- **Operators**: All standard bash operators (pipes, redirects, logical, substitution)
+- **Patterns**: ~50 common compound patterns (e.g., `find | xargs`, `grep | sort | uniq -c`, `curl | jq`)
+- **Concepts**: Short explanations of key bash concepts (pipes, redirects, exit codes, globbing, quoting, variable expansion)
+
+For any command or flag not in the knowledge base, display the raw component with a "not yet documented" indicator and a link to `man7.org`.
+
+---
+
+## Edge Cases & Error Handling
+
+- **No sessions found**: Friendly error message with expected path and troubleshooting
+- **Session has no bash commands**: "This session didn't use any bash commands. Try analyzing more sessions with `--sessions 5`."
+- **Unparseable commands**: Include in output with "complex command" label, show raw string without breakdown
+- **Very large sessions**: Cap at 500 unique commands per generation (show "and N more..." indicator)
+- **Non-UTF8 output in tool_result**: Sanitize/escape for HTML display
+- **Multi-line commands**: Detect heredocs, multi-line strings; display as single block
+- **Python not found**: CLI should check for Python 3 and show install instructions if missing
+
+---
+
+## Future Considerations (Out of Scope for v1)
+
+- **LLM integration**: Use Claude API to generate richer explanations, personalized learning paths, and natural-language quiz feedback
+- **Persistent state**: Track progress across runs, spaced repetition for weak areas
+- **Diff mode**: Compare bash usage across sessions ("This week you started using `jq` — here's a deep dive")
+- **Export formats**: Markdown, PDF, Anki flashcard deck
+- **Custom knowledge base**: Let users add their own command/flag definitions
+- **MCP server mode**: Serve learning content directly inside Claude Code as a tool
+
+---
+
+## Success Metrics
+
+- Generates valid, openable HTML from any standard Claude Code session JSONL
+- Correctly categorizes ≥ 90% of common bash commands
+- All quiz questions have exactly one correct answer with plausible distractors
+- HTML file size < 2MB for a typical session (< 200 unique commands)
+- Generation completes in < 5 seconds for a single session
+- Zero external runtime dependencies beyond Python 3 and Node.js

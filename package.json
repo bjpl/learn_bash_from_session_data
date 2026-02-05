@@ -1,0 +1,23 @@
+{
+  "name": "learn_bash_from_session_data",
+  "version": "1.0.0",
+  "description": "Learn bash from your Claude Code sessions - extracts commands and generates interactive HTML lessons",
+  "main": "bin/learn-bash.js",
+  "bin": {
+    "learn-bash": "./bin/learn-bash.js",
+    "bash-learner": "./bin/learn-bash.js"
+  },
+  "scripts": {
+    "test": "node tests/test-runner.js"
+  },
+  "keywords": ["bash", "learning", "claude", "cli", "terminal", "shell"],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bjpl/learn_bash_from_session_data"
+  }
+}

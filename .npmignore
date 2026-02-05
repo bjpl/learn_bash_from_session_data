@@ -1,0 +1,21 @@
+# Development files
+tests/
+.claude/
+.claude-flow/
+.swarm/
+docs/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Config files
+.mcp.json
+CLAUDE.md
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
