@@ -993,6 +993,37 @@ def create_quiz(
     )
 
 
+def generate_quizzes(
+    commands: list[dict],
+    analysis: dict,
+    question_count: int = 20
+) -> list[dict]:
+    """
+    Generate quizzes from commands and analysis for the pipeline.
+
+    This is the interface expected by main.py.
+
+    Args:
+        commands: List of command dictionaries
+        analysis: Analysis dictionary from analyze_commands
+        question_count: Target number of questions
+
+    Returns:
+        List of quiz question dictionaries
+    """
+    # Get analyzed commands from analysis if available, otherwise use raw commands
+    analyzed_commands = analysis.get('commands', commands)
+
+    if not analyzed_commands:
+        return []
+
+    # Generate quiz questions
+    questions = generate_quiz_set(analyzed_commands, question_count)
+
+    # Convert QuizQuestion objects to dictionaries using the built-in method
+    return [q.to_dict() for q in questions]
+
+
 # =============================================================================
 # Main entry point for testing
 # =============================================================================

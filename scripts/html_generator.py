@@ -6,13 +6,14 @@ Generates a single self-contained HTML file with all CSS and JS inline.
 No external dependencies - pure Python standard library.
 """
 
-from typing import Any
+from typing import Any, List
 from datetime import datetime
+from pathlib import Path
 import html
 import json
 
 
-def generate_html(analysis_result: dict[str, Any], quizzes: list[dict[str, Any]]) -> str:
+def _generate_html_impl(analysis_result: dict[str, Any], quizzes: list[dict[str, Any]]) -> str:
     """
     Generate complete HTML report from analysis results and quizzes.
 
@@ -1955,6 +1956,126 @@ def get_inline_js(quizzes: list[dict]) -> str:
             }});
         }});
     '''
+
+
+def generate_html_files(
+    commands: List[dict],
+    analysis: dict,
+    quizzes: list,
+    output_dir: Path
+) -> List[Path]:
+    """
+    Generate HTML files from commands, analysis and quizzes.
+
+    This is the interface expected by main.py for the pipeline.
+
+    Args:
+        commands: List of command dictionaries
+        analysis: Analysis dictionary from analyze_commands
+        quizzes: List of quiz dictionaries
+        output_dir: Output directory path
+
+    Returns:
+        List of generated file paths
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build analysis_result in expected format for generate_html
+    stats = analysis.get('statistics', {})
+    categories = analysis.get('categories', {})
+    analyzed_commands = analysis.get('commands', commands)
+
+    # Transform commands to expected format
+    formatted_commands = []
+    for cmd in analyzed_commands:
+        # Convert flags to expected format (list of dicts with 'flag' and 'description')
+        raw_flags = cmd.get('flags', [])
+        formatted_flags = []
+        for f in raw_flags:
+            if isinstance(f, dict):
+                formatted_flags.append(f)
+            elif isinstance(f, str):
+                formatted_flags.append({'flag': f, 'description': ''})
+
+        formatted_commands.append({
+            'base_command': cmd.get('base_command', cmd.get('command', '').split()[0] if cmd.get('command') else ''),
+            'full_command': cmd.get('command', ''),
+            'category': cmd.get('category', 'Other'),
+            'complexity': cmd.get('complexity', 1),
+            'frequency': cmd.get('frequency', 1),
+            'description': cmd.get('description', ''),
+            'flags': formatted_flags,
+            'is_new': False,
+        })
+
+    analysis_result = {
+        'stats': {
+            'total_commands': stats.get('total_commands', len(commands)),
+            'unique_commands': stats.get('unique_commands', len(commands)),
+            'total_categories': len(categories),
+            'complexity_avg': stats.get('average_complexity', 2),
+        },
+        'commands': formatted_commands,
+        'categories': {cat: [c.get('command', '') for c in cmds] for cat, cmds in categories.items()},
+    }
+
+    # Transform quizzes to expected format for HTML generator
+    # HTML generator expects: options as list of strings, correct_answer as int index
+    formatted_quizzes = []
+    for quiz in quizzes:
+        options = quiz.get('options', [])
+
+        # Convert options from dicts to strings and find correct index
+        option_texts = []
+        correct_idx = 0
+        for idx, opt in enumerate(options):
+            if isinstance(opt, dict):
+                option_texts.append(opt.get('text', ''))
+                if opt.get('is_correct', False):
+                    correct_idx = idx
+            else:
+                option_texts.append(str(opt))
+
+        formatted_quizzes.append({
+            'question': quiz.get('question', ''),
+            'options': option_texts,
+            'correct_answer': correct_idx,
+            'explanation': quiz.get('explanation', ''),
+        })
+
+    # Generate HTML
+    html_content = _generate_html_impl(analysis_result, formatted_quizzes)
+
+    # Write to file
+    index_file = output_dir / "index.html"
+    with open(index_file, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+
+    return [index_file]
+
+
+def generate_html(
+    commands_or_analysis: Any,
+    analysis_or_quizzes: Any = None,
+    quizzes: Any = None,
+    output_dir: Any = None
+) -> Any:
+    """
+    Wrapper that handles both original 2-param and main.py 4-param signatures.
+
+    Original: generate_html(analysis_result, quizzes) -> str
+    Pipeline: generate_html(commands, analysis, quizzes, output_dir) -> List[Path]
+    """
+    if output_dir is not None:
+        # Called with 4 params from main.py pipeline
+        return generate_html_files(commands_or_analysis, analysis_or_quizzes, quizzes, output_dir)
+    elif quizzes is not None:
+        # Called with 3 params (shouldn't happen but handle it)
+        return generate_html_files(commands_or_analysis, analysis_or_quizzes, quizzes, Path('./output'))
+    else:
+        # Original 2-param call: generate_html(analysis_result, quizzes)
+        return _generate_html_impl(commands_or_analysis, analysis_or_quizzes)
 
 
 if __name__ == "__main__":

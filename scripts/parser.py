@@ -574,19 +574,56 @@ def parse_command(
 
 
 def parse_commands(
-    commands: list[tuple[str, str, str]]
-) -> list[ParsedCommand]:
+    commands: list
+) -> list[dict]:
     """
     Convenience function to parse multiple bash commands.
 
     Args:
-        commands: List of (command, description, output) tuples
+        commands: List of (command, description, output) tuples OR
+                  List of dicts with 'command', 'description', 'output' keys
 
     Returns:
-        List of ParsedCommand objects
+        List of parsed command dictionaries
     """
     parser = BashParser()
-    return parser.parse_batch(commands)
+
+    # Normalize input to tuples
+    normalized = []
+    for item in commands:
+        if isinstance(item, dict):
+            cmd = item.get('command', '')
+            desc = item.get('description', '')
+            output = item.get('output', '')
+            normalized.append((cmd, desc, output))
+        elif isinstance(item, (tuple, list)) and len(item) >= 3:
+            normalized.append((item[0], item[1], item[2]))
+        elif isinstance(item, str):
+            normalized.append((item, '', ''))
+        else:
+            continue
+
+    parsed_objs = parser.parse_batch(normalized)
+
+    # Convert ParsedCommand objects to dicts for pipeline compatibility
+    return [
+        {
+            'command': p.raw,
+            'raw': p.raw,
+            'base_command': p.base_commands[0] if p.base_commands else '',
+            'base_commands': p.base_commands,
+            'flags': p.flags,
+            'args': p.arguments,
+            'pipes': p.pipes,
+            'redirects': p.redirects,
+            'category': p.category.value if p.category else 'unknown',
+            'complexity': p.complexity_score,
+            'description': p.description,
+            'output': p.output,
+            'is_compound': len(p.base_commands) > 1 or len(p.pipes) > 0,
+        }
+        for p in parsed_objs
+    ]
 
 
 if __name__ == "__main__":

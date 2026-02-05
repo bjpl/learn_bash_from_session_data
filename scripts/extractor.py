@@ -348,6 +348,43 @@ class JSONLExtractor:
         return all_commands
 
 
+def extract_commands(entries: list[dict]) -> list[dict]:
+    """
+    Extract bash commands from a list of session entries.
+
+    This is the interface expected by main.py for pipeline processing.
+
+    Args:
+        entries: List of parsed JSON entries from session files
+
+    Returns:
+        List of command dictionaries with 'command', 'description', 'output' keys
+    """
+    extractor = JSONLExtractor()
+    tool_uses: dict[str, dict] = {}
+    tool_results: dict[str, dict] = {}
+    sequence_counter = 0
+
+    for entry in entries:
+        extractor._process_entry(entry, tool_uses, tool_results, sequence_counter)
+        sequence_counter += 1
+
+    extracted = extractor._correlate_commands(tool_uses, tool_results)
+
+    # Convert ExtractedCommand objects to dicts for pipeline compatibility
+    return [
+        {
+            'command': cmd.command,
+            'description': cmd.description,
+            'output': cmd.output,
+            'timestamp': cmd.timestamp,
+            'success': cmd.success,
+            'exit_code': cmd.exit_code,
+        }
+        for cmd in extracted
+    ]
+
+
 def extract_commands_from_jsonl(file_path: str | Path) -> list[ExtractedCommand]:
     """
     Convenience function to extract commands from a single JSONL file.

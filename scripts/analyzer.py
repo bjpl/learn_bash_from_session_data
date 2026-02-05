@@ -565,6 +565,70 @@ def quick_analyze(commands: List[str], verbose: bool = False) -> Dict[str, Any]:
     return summary
 
 
+def analyze_commands(commands: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Analyze a list of command dictionaries for the pipeline.
+
+    This is the interface expected by main.py.
+
+    Args:
+        commands: List of command dictionaries with 'command' key
+
+    Returns:
+        Dictionary with 'categories', 'commands', 'statistics' keys
+    """
+    # Extract command strings from dictionaries
+    cmd_strings = [
+        cmd.get('command', '') or cmd.get('raw', '')
+        for cmd in commands
+        if cmd.get('command') or cmd.get('raw')
+    ]
+
+    if not cmd_strings:
+        return {
+            'categories': {},
+            'commands': [],
+            'statistics': {},
+        }
+
+    result = analyze_session(cmd_strings)
+
+    # Build analyzed command list with parsed info
+    analyzed_commands = []
+    for cmd_dict in commands:
+        cmd_str = cmd_dict.get('command', '') or cmd_dict.get('raw', '')
+        if cmd_str:
+            parsed = parse_command(cmd_str)
+            analyzed_commands.append({
+                'command': cmd_str,
+                'description': cmd_dict.get('description', ''),
+                'output': cmd_dict.get('output', ''),
+                'base_command': parsed.base_command,
+                'flags': parsed.flags,
+                'args': parsed.args,
+                'complexity': score_complexity(parsed),
+                'category': assign_category(parsed),
+                'success': cmd_dict.get('success', True),
+            })
+
+    # Group by category
+    categories = {}
+    for cmd in analyzed_commands:
+        cat = cmd['category']
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(cmd)
+
+    return {
+        'categories': categories,
+        'commands': analyzed_commands,
+        'statistics': result.statistics,
+        'category_breakdown': result.category_breakdown,
+        'complexity_distribution': result.complexity_distribution,
+        'top_commands': result.top_commands,
+    }
+
+
 if __name__ == "__main__":
     # Example usage and testing
     test_commands = [
