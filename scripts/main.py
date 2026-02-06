@@ -22,7 +22,7 @@ if sys.version_info < (3, 8):
 # Constants
 DEFAULT_OUTPUT_BASE = "./bash-learner-output"
 MAX_UNIQUE_COMMANDS = 500
-VERSION = "1.0.10"
+VERSION = "1.1.0"
 
 
 def generate_timestamped_output_dir(base_dir: str = DEFAULT_OUTPUT_BASE) -> Path:
