@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+
+# Output and data
+bash-learner-output/
+test-output/
+vectors.db
+*.db
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Flow
+.claude-flow/
+
+# Session output
+session-slides/
+
+# Logs
+*.log

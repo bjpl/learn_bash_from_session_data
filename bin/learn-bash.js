@@ -240,26 +240,29 @@ function checkPython() {
  */
 function openInBrowser(filePath) {
   const platform = os.platform();
+  const isWindows = platform === 'win32' ||
+    process.env.MSYSTEM != null ||
+    (process.env.OSTYPE && process.env.OSTYPE.includes('msys')) ||
+    isWSL();
   let cmd;
   let args;
 
-  switch (platform) {
-    case 'darwin':
-      cmd = 'open';
-      args = [filePath];
-      break;
-    case 'win32':
-      cmd = 'cmd';
-      args = ['/c', 'start', '', filePath];
-      break;
-    default:
-      // Linux and others
-      cmd = 'xdg-open';
-      args = [filePath];
+  if (platform === 'darwin') {
+    cmd = 'open';
+    args = [filePath];
+  } else if (isWindows) {
+    // Works from native Windows, MSYS, Git Bash, and WSL
+    cmd = process.env.COMSPEC || 'cmd.exe';
+    args = ['/c', 'start', '', filePath.replace(/\//g, '\\')];
+  } else {
+    cmd = 'xdg-open';
+    args = [filePath];
   }
 
   try {
-    spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref();
+    const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+    child.on('error', () => {});  // Suppress async spawn errors
+    child.unref();
     return true;
   } catch (e) {
     return false;

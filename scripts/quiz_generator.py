@@ -18,6 +18,45 @@ import random
 import re
 import hashlib
 
+try:
+    from scripts.knowledge_base import COMMAND_DB, get_command_info, get_flags_for_command
+except ImportError:
+    try:
+        from knowledge_base import COMMAND_DB, get_command_info, get_flags_for_command
+    except ImportError:
+        COMMAND_DB = {}
+        def get_command_info(name): return None
+        def get_flags_for_command(command): return {}
+
+
+def _get_flags_for_cmd(cmd: str) -> dict[str, str]:
+    """Get merged flags for a command from knowledge_base (primary) and local FLAG_DATABASE (fallback).
+
+    Knowledge_base.py COMMAND_DB is the authoritative source. FLAG_DATABASE provides
+    additional coverage for commands not yet in knowledge_base.
+    """
+    flags = {}
+    # Primary source: knowledge_base COMMAND_DB
+    kb_flags = get_flags_for_command(cmd)
+    if kb_flags:
+        flags.update(kb_flags)
+    # Fallback/supplement: local FLAG_DATABASE
+    if cmd in FLAG_DATABASE:
+        for flag, desc in FLAG_DATABASE[cmd].items():
+            if flag not in flags:
+                flags[flag] = desc
+    return flags
+
+
+def _get_all_flagged_commands() -> set[str]:
+    """Get the set of all commands that have flag data from any source."""
+    cmds = set()
+    for cmd, info in COMMAND_DB.items():
+        if info.get("flags"):
+            cmds.add(cmd)
+    cmds.update(FLAG_DATABASE.keys())
+    return cmds
+
 
 class QuizType(Enum):
     """Types of quiz questions."""
@@ -397,37 +436,98 @@ def _generate_bash_description(cmd_string: str) -> str:
     Generate an educational description focusing on bash concepts.
 
     Explains what each part of the command does from a bash perspective.
+    Handles: &&, ||, |, 2>&1, 2>/dev/null, and combinations.
     """
     if not cmd_string:
         return "Runs a command"
 
+    # Clean up redirections for description (note them but don't clutter)
+    has_stderr_to_stdout = '2>&1' in cmd_string
+    has_stderr_to_null = '2>/dev/null' in cmd_string
+    has_stdout_redirect = re.search(r'>\s*\S+', cmd_string) and '2>' not in cmd_string
+
+    # Remove redirections for parsing (we'll note them separately)
+    clean_cmd = re.sub(r'\s*2>&1\s*', ' ', cmd_string)
+    clean_cmd = re.sub(r'\s*2>/dev/null\s*', ' ', clean_cmd)
+    clean_cmd = re.sub(r'\s*>\s*\S+\s*', ' ', clean_cmd)
+    clean_cmd = ' '.join(clean_cmd.split())  # normalize whitespace
+
     parts = []
 
-    # Check for command chaining
-    if ' && ' in cmd_string:
-        commands = cmd_string.split(' && ')
+    # Handle && (run if previous succeeds)
+    if ' && ' in clean_cmd:
+        commands = clean_cmd.split(' && ')
         for i, cmd in enumerate(commands):
-            base = cmd.strip().split()[0] if cmd.strip() else ''
-            if i == 0:
-                parts.append(_describe_single_command(cmd.strip()))
+            cmd = cmd.strip()
+            if not cmd:
+                continue
+            # Handle nested || or | within && segments
+            if ' || ' in cmd:
+                parts.append(_describe_or_chain(cmd))
+            elif ' | ' in cmd:
+                parts.append(_describe_pipe_chain(cmd))
+            elif i == 0:
+                parts.append(_describe_single_command(cmd))
             else:
-                parts.append(f"then {_describe_single_command(cmd.strip())}")
-        return ', '.join(parts)
+                parts.append(f"then {_describe_single_command(cmd)}")
 
-    if ' || ' in cmd_string:
-        commands = cmd_string.split(' || ')
-        parts.append(_describe_single_command(commands[0].strip()))
-        parts.append(f"or if that fails, {_describe_single_command(commands[1].strip())}")
-        return ', '.join(parts)
+    # Handle || (run if previous fails)
+    elif ' || ' in clean_cmd:
+        parts.append(_describe_or_chain(clean_cmd))
 
-    if ' | ' in cmd_string:
-        commands = cmd_string.split(' | ')
-        parts.append(_describe_single_command(commands[0].strip()))
-        for cmd in commands[1:]:
-            parts.append(f"pipes output to {_describe_single_command(cmd.strip())}")
-        return ', '.join(parts)
+    # Handle | (pipe)
+    elif ' | ' in clean_cmd:
+        parts.append(_describe_pipe_chain(clean_cmd))
 
-    return _describe_single_command(cmd_string)
+    else:
+        parts.append(_describe_single_command(clean_cmd))
+
+    result = ', '.join(parts)
+
+    # Add redirection notes
+    if has_stderr_to_null:
+        result += " (suppressing errors)"
+    elif has_stderr_to_stdout:
+        result += " (capturing all output)"
+
+    return result
+
+
+def _describe_or_chain(cmd_string: str) -> str:
+    """Describe an || chain (fallback pattern)."""
+    commands = cmd_string.split(' || ')
+    parts = []
+    for i, cmd in enumerate(commands):
+        cmd = cmd.strip()
+        if not cmd:
+            continue
+        # Handle pipes within || segments
+        if ' | ' in cmd:
+            desc = _describe_pipe_chain(cmd)
+        else:
+            desc = _describe_single_command(cmd)
+
+        if i == 0:
+            parts.append(desc)
+        else:
+            parts.append(f"or if that fails, {desc}")
+    return ', '.join(parts)
+
+
+def _describe_pipe_chain(cmd_string: str) -> str:
+    """Describe a pipe chain."""
+    commands = cmd_string.split(' | ')
+    parts = []
+    for i, cmd in enumerate(commands):
+        cmd = cmd.strip()
+        if not cmd:
+            continue
+        desc = _describe_single_command(cmd)
+        if i == 0:
+            parts.append(desc)
+        else:
+            parts.append(f"pipes to {desc}")
+    return ', '.join(parts)
 
 
 def _describe_single_command(cmd: str) -> str:
@@ -437,6 +537,19 @@ def _describe_single_command(cmd: str) -> str:
 
     tokens = cmd.split()
     base_cmd = tokens[0] if tokens else ''
+
+    # Get args (skip flags) for knowledge_base fallback
+    args = [t for t in tokens[1:] if not t.startswith('-')]
+
+    # Check knowledge_base COMMAND_DB for rich description
+    if base_cmd and base_cmd in COMMAND_DB:
+        cmd_info = COMMAND_DB[base_cmd]
+        kb_desc = cmd_info.get('description', '')
+        if kb_desc:
+            # Use knowledge base description but make it contextual with args
+            if args:
+                return f"{kb_desc.lower()} ({' '.join(args[:2])})"
+            return kb_desc.lower()
 
     # Common command descriptions with bash focus
     descriptions = {
@@ -576,35 +689,35 @@ def _parse_command(cmd_string: str) -> dict:
 
 
 def _get_flag_description(cmd: str, flag: str) -> Optional[str]:
-    """Get description for a flag of a command."""
-    if cmd in FLAG_DATABASE:
-        # Handle flags like -la (combined short flags)
-        if flag in FLAG_DATABASE[cmd]:
-            return FLAG_DATABASE[cmd][flag]
-        # Try individual characters for combined flags
-        if len(flag) > 2 and flag.startswith("-") and not flag.startswith("--"):
-            for char in flag[1:]:
-                single_flag = f"-{char}"
-                if single_flag in FLAG_DATABASE[cmd]:
-                    return FLAG_DATABASE[cmd][single_flag]
+    """Get description for a flag of a command from merged sources."""
+    merged = _get_flags_for_cmd(cmd)
+    if flag in merged:
+        return merged[flag]
+    # Try individual characters for combined flags (e.g., -la -> -l, -a)
+    if len(flag) > 2 and flag.startswith("-") and not flag.startswith("--"):
+        for char in flag[1:]:
+            single_flag = f"-{char}"
+            if single_flag in merged:
+                return merged[single_flag]
     return None
 
 
 def _generate_distractor_flags(cmd: str, correct_flag: str, count: int = 3) -> list[str]:
-    """Generate plausible distractor flags."""
+    """Generate plausible distractor flags from merged knowledge sources."""
     distractors = []
 
-    # Get other flags from the same command
-    if cmd in FLAG_DATABASE:
-        other_flags = [f for f in FLAG_DATABASE[cmd].keys() if f != correct_flag]
+    # Get other flags from the same command (merged sources)
+    cmd_flags = _get_flags_for_cmd(cmd)
+    if cmd_flags:
+        other_flags = [f for f in cmd_flags.keys() if f != correct_flag]
         random.shuffle(other_flags)
         distractors.extend(other_flags[:count])
 
     # If we need more, get common flags from other commands
     if len(distractors) < count:
-        for other_cmd, flags in FLAG_DATABASE.items():
+        for other_cmd in _get_all_flagged_commands():
             if other_cmd != cmd:
-                for flag in flags:
+                for flag in _get_flags_for_cmd(other_cmd):
                     if flag not in distractors and flag != correct_flag:
                         distractors.append(flag)
                         if len(distractors) >= count:
@@ -616,20 +729,44 @@ def _generate_distractor_flags(cmd: str, correct_flag: str, count: int = 3) -> l
 
 
 def _generate_distractor_descriptions(correct_desc: str, count: int = 3) -> list[str]:
-    """Generate plausible wrong descriptions."""
+    """Generate plausible wrong descriptions using command-level descriptions for length parity."""
     distractors = []
 
-    # Collect all descriptions from FLAG_DATABASE
-    all_descriptions = []
-    for cmd_flags in FLAG_DATABASE.values():
-        all_descriptions.extend(cmd_flags.values())
+    # First: collect command-level descriptions from COMMAND_DB (similar length to correct answer)
+    cmd_descriptions = []
+    for cmd_name in COMMAND_DB:
+        cmd_info = COMMAND_DB[cmd_name]
+        desc = cmd_info.get('description', '')
+        if desc and desc.lower() != correct_desc.lower():
+            # Truncate very long descriptions to similar length as correct answer
+            max_len = max(len(correct_desc) + 40, 80)
+            if len(desc) > max_len:
+                desc = desc[:max_len].rsplit(' ', 1)[0] + '...'
+            cmd_descriptions.append(desc)
 
-    # Remove duplicates and the correct answer
-    all_descriptions = list(set(all_descriptions))
-    all_descriptions = [d for d in all_descriptions if d.lower() != correct_desc.lower()]
+    if cmd_descriptions:
+        random.shuffle(cmd_descriptions)
+        distractors.extend(cmd_descriptions[:count])
 
-    random.shuffle(all_descriptions)
-    return all_descriptions[:count]
+    # Fallback: use flag descriptions if not enough command descriptions
+    if len(distractors) < count:
+        all_flag_descs = []
+        for cmd in _get_all_flagged_commands():
+            all_flag_descs.extend(_get_flags_for_cmd(cmd).values())
+        all_flag_descs = list(set(all_flag_descs))
+        all_flag_descs = [d for d in all_flag_descs if d.lower() != correct_desc.lower()]
+        random.shuffle(all_flag_descs)
+        distractors.extend(all_flag_descs[:count - len(distractors)])
+
+    # Remove duplicates
+    seen = set()
+    unique = []
+    for d in distractors:
+        dl = d.lower()
+        if dl not in seen:
+            seen.add(dl)
+            unique.append(d)
+    return unique[:count]
 
 
 def generate_what_does_quiz(
@@ -647,29 +784,25 @@ def generate_what_does_quiz(
         QuizQuestion instance
     """
     cmd_string = command.get("command", "")
-    description = command.get("description", "")
     complexity = command.get("complexity", 2)
 
     parsed = _parse_command(cmd_string)
     base_cmd = parsed["base"]
 
-    # Build the correct description using educational bash-focused generator
-    correct_desc = description
-    if not correct_desc:
-        # Use the educational bash description generator
-        correct_desc = _generate_bash_description(cmd_string)
-        # Capitalize first letter for consistent formatting
-        if correct_desc:
-            correct_desc = correct_desc[0].upper() + correct_desc[1:]
+    # Always use the educational bash description generator (not session descriptions)
+    correct_desc = _generate_bash_description(cmd_string)
+    # Capitalize first letter for consistent formatting
+    if correct_desc:
+        correct_desc = correct_desc[0].upper() + correct_desc[1:]
 
-        # Add flag details if available
-        flag_descs = []
-        for flag in parsed["flags"]:
-            fd = _get_flag_description(base_cmd, flag)
-            if fd:
-                flag_descs.append(f"{flag} ({fd.lower()})")
-        if flag_descs:
-            correct_desc += " using " + ", ".join(flag_descs)
+    # Add flag details if available
+    flag_descs = []
+    for flag in parsed["flags"]:
+        fd = _get_flag_description(base_cmd, flag)
+        if fd:
+            flag_descs.append(f"{flag} ({fd.lower()})")
+    if flag_descs:
+        correct_desc += " using " + ", ".join(flag_descs)
 
     # Generate distractors
     distractor_descriptions = _generate_distractor_descriptions(correct_desc, 3)
@@ -680,9 +813,27 @@ def generate_what_does_quiz(
         for rel_cmd in related_cmds[:3 - len(distractor_descriptions)]:
             distractor_descriptions.append(f"Runs {rel_cmd} to process files")
 
-    # Ensure we have exactly 3 distractors
+    # Ensure we have exactly 3 distractors with plausible alternatives
+    fallback_actions = [
+        f"List directory contents with detailed file information",
+        f"Search recursively through files for matching patterns",
+        f"Display or modify file permissions and ownership",
+        f"Compress or archive files for storage and transfer",
+        f"Monitor system processes and resource usage",
+        f"Download files from a remote server or URL",
+        f"Edit configuration files in the default text editor",
+        f"Install or update packages from the package manager",
+    ]
+    random.shuffle(fallback_actions)
+    fb_idx = 0
     while len(distractor_descriptions) < 3:
-        distractor_descriptions.append(f"Performs an unrelated {base_cmd} operation")
+        if fb_idx < len(fallback_actions):
+            fallback = fallback_actions[fb_idx]
+            if fallback.lower() != correct_desc.lower():
+                distractor_descriptions.append(fallback)
+            fb_idx += 1
+        else:
+            distractor_descriptions.append(f"Run a system utility to process input data")
 
     # Create options (shuffle positions)
     options = []
@@ -736,16 +887,17 @@ def generate_which_flag_quiz(
     parsed = _parse_command(cmd_string)
     base_cmd = parsed["base"]
 
-    if base_cmd not in FLAG_DATABASE or not parsed["flags"]:
+    cmd_flags = _get_flags_for_cmd(base_cmd)
+    if not cmd_flags or not parsed["flags"]:
         return None
 
     # Pick a flag to quiz on
-    available_flags = [f for f in parsed["flags"] if f in FLAG_DATABASE.get(base_cmd, {})]
+    available_flags = [f for f in parsed["flags"] if f in cmd_flags]
     if not available_flags:
         return None
 
     target_flag = random.choice(available_flags)
-    flag_desc = FLAG_DATABASE[base_cmd][target_flag]
+    flag_desc = cmd_flags[target_flag]
 
     # Generate distractor flags
     distractor_flags = _generate_distractor_flags(base_cmd, target_flag, 3)
@@ -770,13 +922,13 @@ def generate_which_flag_quiz(
             correct_id = opt_id
 
         # Get description for option explanation
-        flag_explanation = FLAG_DATABASE.get(base_cmd, {}).get(flag, "Unknown flag")
+        flag_explanation = cmd_flags.get(flag, "Unknown flag")
 
         options.append(QuizOption(
             id=opt_id,
             text=flag,
             is_correct=is_correct,
-            explanation=f"{flag}: {flag_explanation}" if flag in FLAG_DATABASE.get(base_cmd, {}) else f"{flag}: Not a standard flag for {base_cmd}"
+            explanation=f"{flag}: {flag_explanation}" if flag in cmd_flags else f"{flag}: Not a standard flag for {base_cmd}"
         ))
 
     question_id = _generate_id(f"which_flag_{base_cmd}_{target_flag}")
@@ -809,25 +961,24 @@ def generate_build_command_quiz(
         QuizQuestion instance
     """
     cmd_string = command.get("command", "")
-    description = command.get("description", "")
-    intent = command.get("intent", description)
 
     parsed = _parse_command(cmd_string)
     base_cmd = parsed["base"]
 
-    # Create the correct command structure
-    correct_components = [base_cmd] + parsed["flags"] + parsed["args"]
-    correct_answer = " ".join(correct_components)
+    # Use the original command string as correct answer (preserves flag-argument ordering)
+    correct_answer = cmd_string.strip()
 
-    # Generate wrong arrangements
+    # Generate wrong arrangements using parsed components
+    all_parts = [base_cmd] + parsed["flags"] + parsed["args"]
     distractors = []
 
-    # Distractor 1: Wrong order
-    if len(correct_components) > 2:
-        wrong_order = correct_components.copy()
+    # Distractor 1: Wrong order of components
+    if len(all_parts) > 2:
+        wrong_order = all_parts.copy()
         random.shuffle(wrong_order)
-        if wrong_order != correct_components:
-            distractors.append(" ".join(wrong_order))
+        wrong_str = " ".join(wrong_order)
+        if wrong_str != correct_answer:
+            distractors.append(wrong_str)
 
     # Distractor 2: Missing flag
     if parsed["flags"]:
@@ -835,7 +986,7 @@ def generate_build_command_quiz(
         distractors.append(" ".join(missing_flag))
 
     # Distractor 3: Wrong flag
-    if parsed["flags"] and base_cmd in FLAG_DATABASE:
+    if parsed["flags"] and _get_flags_for_cmd(base_cmd):
         wrong_flags = _generate_distractor_flags(base_cmd, parsed["flags"][0], 1)
         if wrong_flags:
             wrong_flag_cmd = [base_cmd] + [wrong_flags[0]] + parsed["flags"][1:] + parsed["args"]
@@ -847,15 +998,31 @@ def generate_build_command_quiz(
         wrong_cmd = [related[0]] + parsed["flags"] + parsed["args"]
         distractors.append(" ".join(wrong_cmd))
 
-    # Ensure we have exactly 3 distractors
+    # Ensure we have exactly 3 distractors with plausible alternatives
+    # Use real flags from the knowledge base as fallback distractors
+    all_cmd_flags = list(_get_flags_for_cmd(base_cmd).keys())
+    random.shuffle(all_cmd_flags)
+    fb_flag_idx = 0
     while len(distractors) < 3:
-        # Add a clearly wrong option
-        distractors.append(f"{base_cmd} --invalid-option")
+        if fb_flag_idx < len(all_cmd_flags):
+            fallback_flag = all_cmd_flags[fb_flag_idx]
+            fallback_cmd = f"{base_cmd} {fallback_flag} {' '.join(parsed['args'])}"
+            if fallback_cmd.strip() != correct_answer:
+                distractors.append(fallback_cmd.strip())
+            fb_flag_idx += 1
+        else:
+            # Use a related command as last resort
+            related = _get_related_commands(base_cmd)
+            if related:
+                rel = related[len(distractors) % len(related)]
+                distractors.append(f"{rel} {' '.join(parsed['flags'])} {' '.join(parsed['args'])}".strip())
+            else:
+                distractors.append(f"{base_cmd} {' '.join(parsed['args'])}".strip())
 
     # Remove duplicates and correct answer from distractors
     distractors = list(set(d for d in distractors if d != correct_answer))[:3]
     while len(distractors) < 3:
-        distractors.append(f"{base_cmd} --wrong-flag")
+        distractors.append(f"{base_cmd} {' '.join(parsed['args'])}".strip())
 
     # Create options
     all_answers = [correct_answer] + distractors[:3]
@@ -878,14 +1045,8 @@ def generate_build_command_quiz(
 
     question_id = _generate_id(f"build_{cmd_string}")
 
-    # Use educational bash description for task if no intent/description available
-    if intent:
-        task_description = intent
-    elif description:
-        task_description = description
-    else:
-        # Generate educational description from the command
-        task_description = _generate_bash_description(cmd_string)
+    # Always generate description from the command itself (not session descriptions)
+    task_description = _generate_bash_description(cmd_string)
 
     return QuizQuestion(
         id=question_id,
@@ -940,14 +1101,19 @@ def generate_spot_difference_quiz(
 
     # Build the correct explanation of difference
     differences = []
-    if only_in_1:
-        for flag in only_in_1:
+    has_unknown = False
+    for flag_set, label in [(only_in_1, "Command 1"), (only_in_2, "Command 2")]:
+        for flag in flag_set:
             desc = _get_flag_description(base_cmd, flag)
-            differences.append(f"Command 1 has `{flag}` ({desc or 'unknown'})")
-    if only_in_2:
-        for flag in only_in_2:
-            desc = _get_flag_description(base_cmd, flag)
-            differences.append(f"Command 2 has `{flag}` ({desc or 'unknown'})")
+            # Handle numeric flags like -3 (shorthand for -n 3)
+            if not desc and re.match(r'^-\d+$', flag):
+                desc = f"Specify count ({flag[1:]})"
+            if not desc:
+                has_unknown = True
+            differences.append(f"{label} has `{flag}` ({desc or 'specifies an option'})")
+    # Skip questions where we can't explain the flags well
+    if has_unknown:
+        return None
     if parsed1["args"] != parsed2["args"]:
         differences.append(f"Different arguments: '{' '.join(parsed1['args'])}' vs '{' '.join(parsed2['args'])}'")
 
@@ -1004,14 +1170,15 @@ def _create_similar_command_variant(command: dict) -> Optional[dict]:
     parsed = _parse_command(cmd_string)
     base_cmd = parsed["base"]
 
-    if base_cmd not in FLAG_DATABASE:
+    variant_flags = _get_flags_for_cmd(base_cmd)
+    if not variant_flags:
         return None
 
     # Strategy: add, remove, or change a flag
     strategies = []
 
     # Can add a flag
-    available_flags = [f for f in FLAG_DATABASE[base_cmd].keys() if f not in parsed["flags"]]
+    available_flags = [f for f in variant_flags.keys() if f not in parsed["flags"]]
     if available_flags:
         strategies.append("add")
 
@@ -1062,14 +1229,33 @@ def generate_quiz_set(
     """
     questions: list[QuizQuestion] = []
 
+    # Filter out non-bash entries (Python code fragments, junk tokens, single chars)
+    junk_tokens = {'version', 'total', 'package', 'success', 'error', 'reading',
+                   'editing', 'done', 'warning', 'info', 'note', 'output',
+                   'task', 'goal', 'purpose', 'what', 'description'}
+    clean_commands = []
+    for cmd in analyzed_commands:
+        base = cmd.get("base_command", "")
+        if not base or len(base) < 2:
+            continue
+        if any(c in base for c in ('(', ')', '=', '{', '}')):
+            continue
+        if any(c in base for c in ('\\', '"', "'")) or '&' in base:
+            continue
+        if base[0].isupper() and base.isalpha() and base not in ('PATH', 'HOME'):
+            continue
+        if base.lower() in junk_tokens:
+            continue
+        clean_commands.append(cmd)
+
     # Filter commands by complexity >= 2
     eligible_commands = [
-        cmd for cmd in analyzed_commands
+        cmd for cmd in clean_commands
         if cmd.get("complexity", 0) >= 2
     ]
 
     if not eligible_commands:
-        eligible_commands = analyzed_commands
+        eligible_commands = clean_commands if clean_commands else analyzed_commands
 
     # Weight toward high-frequency commands
     weighted_commands = []
@@ -1088,7 +1274,16 @@ def generate_quiz_set(
     target_build = max(1, int(count * 0.2))
     target_spot_diff = max(1, int(count * 0.15))
 
-    used_commands = set()
+    # Track used commands per quiz type to avoid repeating the same command
+    used_per_type = {
+        QuizType.WHAT_DOES: set(),
+        QuizType.WHICH_FLAG: set(),
+        QuizType.BUILD_COMMAND: set(),
+        QuizType.SPOT_DIFFERENCE: set(),
+    }
+
+    # Max command length for readable quiz questions
+    MAX_QUIZ_CMD_LEN = 200
 
     # Generate "What does this do?" questions
     random.shuffle(weighted_commands)
@@ -1096,38 +1291,64 @@ def generate_quiz_set(
         if len([q for q in questions if q.quiz_type == QuizType.WHAT_DOES]) >= target_what_does:
             break
         cmd_id = cmd.get("command", "")
-        if cmd_id not in used_commands:
+        if len(cmd_id) > MAX_QUIZ_CMD_LEN:
+            continue
+        if cmd_id not in used_per_type[QuizType.WHAT_DOES]:
             q = generate_what_does_quiz(cmd)
             questions.append(q)
-            used_commands.add(cmd_id)
+            used_per_type[QuizType.WHAT_DOES].add(cmd_id)
 
     # Generate "Which flag?" questions
     random.shuffle(weighted_commands)
     for cmd in weighted_commands:
         if len([q for q in questions if q.quiz_type == QuizType.WHICH_FLAG]) >= target_which_flag:
             break
-        q = generate_which_flag_quiz(cmd)
-        if q:
-            questions.append(q)
+        cmd_id = cmd.get("command", "")
+        if cmd_id not in used_per_type[QuizType.WHICH_FLAG]:
+            q = generate_which_flag_quiz(cmd)
+            if q:
+                questions.append(q)
+                used_per_type[QuizType.WHICH_FLAG].add(cmd_id)
 
     # Generate "Build the command" questions
     random.shuffle(weighted_commands)
     for cmd in weighted_commands:
         if len([q for q in questions if q.quiz_type == QuizType.BUILD_COMMAND]) >= target_build:
             break
-        q = generate_build_command_quiz(cmd)
-        questions.append(q)
+        cmd_id = cmd.get("command", "")
+        if len(cmd_id) > MAX_QUIZ_CMD_LEN:
+            continue
+        if cmd_id not in used_per_type[QuizType.BUILD_COMMAND]:
+            q = generate_build_command_quiz(cmd)
+            questions.append(q)
+            used_per_type[QuizType.BUILD_COMMAND].add(cmd_id)
 
     # Generate "Spot the difference" questions
     random.shuffle(weighted_commands)
     for cmd in weighted_commands:
         if len([q for q in questions if q.quiz_type == QuizType.SPOT_DIFFERENCE]) >= target_spot_diff:
             break
-        variant = _create_similar_command_variant(cmd)
-        if variant:
-            q = generate_spot_difference_quiz(cmd, variant)
-            if q:
-                questions.append(q)
+        cmd_id = cmd.get("command", "")
+        if len(cmd_id) > MAX_QUIZ_CMD_LEN:
+            continue
+        if cmd_id not in used_per_type[QuizType.SPOT_DIFFERENCE]:
+            variant = _create_similar_command_variant(cmd)
+            if variant:
+                q = generate_spot_difference_quiz(cmd, variant)
+                if q:
+                    questions.append(q)
+                    used_per_type[QuizType.SPOT_DIFFERENCE].add(cmd_id)
+
+    # Deduplicate by question text (same question can come from different commands)
+    seen_texts = set()
+    deduped = []
+    for q in questions:
+        # Normalize: take first 80 chars of question text
+        q_key = q.question_text[:80]
+        if q_key not in seen_texts:
+            deduped.append(q)
+            seen_texts.add(q_key)
+    questions = deduped
 
     # Shuffle final questions
     random.shuffle(questions)

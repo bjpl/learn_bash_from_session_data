@@ -22,6 +22,7 @@ if sys.version_info < (3, 8):
 # Constants
 DEFAULT_OUTPUT_BASE = "./bash-learner-output"
 MAX_UNIQUE_COMMANDS = 500
+VERSION = "1.0.10"
 
 
 def generate_timestamped_output_dir(base_dir: str = DEFAULT_OUTPUT_BASE) -> Path:
@@ -51,7 +52,8 @@ def get_sessions_base_path() -> Path:
     is_wsl = False
     try:
         with open("/proc/version", "r") as f:
-            is_wsl = "microsoft" in f.read().lower() or "wsl" in f.read().lower()
+            proc_version = f.read().lower()
+            is_wsl = "microsoft" in proc_version or "wsl" in proc_version
     except (FileNotFoundError, PermissionError):
         pass
 
@@ -319,11 +321,66 @@ def run_extraction_pipeline(
     parsed_commands = parse_commands(raw_commands)
     print(f"  -> Parsed {len(parsed_commands)} commands")
 
-    # Step 4: Count frequencies BEFORE deduplication
+    # Step 4: Expand compound commands into individual sub-commands
+    # Also count operators for tracking
     from collections import Counter
+    import re
+
+    operator_frequency = Counter()
+    expanded_commands = []
+
+    # Operator patterns to detect
+    operator_patterns = {
+        '||': r'\|\|',
+        '&&': r'&&',
+        '|': r'(?<!\|)\|(?!\|)',  # Single pipe, not ||
+        '2>&1': r'2>&1',
+        '2>/dev/null': r'2>/dev/null',
+        '>': r'(?<![2&])>(?!>|&)',  # Single >, not >> or 2> or >&
+        '>>': r'>>',
+        '<': r'<(?!<)',
+    }
+
+    for cmd in parsed_commands:
+        cmd_str = cmd.get('command', '') or cmd.get('raw', '')
+        if not cmd_str:
+            continue
+
+        # Count operators in this command
+        for op_name, op_pattern in operator_patterns.items():
+            matches = re.findall(op_pattern, cmd_str)
+            if matches:
+                operator_frequency[op_name] += len(matches)
+
+        # Check if this is a compound command
+        is_compound = any(op in cmd_str for op in ['||', '&&', ' | ', ';'])
+
+        if is_compound:
+            # Extract individual sub-commands from compound statement
+            sub_commands = extract_sub_commands(cmd_str)
+            for sub_cmd in sub_commands:
+                if sub_cmd.strip():
+                    expanded_commands.append({
+                        'command': sub_cmd.strip(),
+                        'raw': sub_cmd.strip(),
+                        'original_compound': cmd_str,
+                        'description': cmd.get('description', ''),
+                        'output': cmd.get('output', ''),
+                    })
+        else:
+            # Simple command - add as-is
+            expanded_commands.append(cmd)
+
+    print(f"  -> Expanded to {len(expanded_commands)} individual commands")
+
+    # Step 5: Re-parse expanded commands to get proper base_command for each
+    parsed_expanded = parse_commands(expanded_commands)
+
+    # Step 6: Count frequencies BEFORE deduplication (for accurate usage stats)
     cmd_frequency = Counter()
     base_cmd_frequency = Counter()
-    for cmd in parsed_commands:
+
+    for cmd in parsed_expanded:
         cmd_str = cmd.get('command', '') or cmd.get('raw', '')
         base_cmd = cmd.get('base_command', '')
         if cmd_str:
@@ -331,8 +388,8 @@ def run_extraction_pipeline(
         if base_cmd:
             base_cmd_frequency[base_cmd] += 1
 
-    # Step 5: Deduplicate and add frequency data
-    unique_commands = deduplicate_commands(parsed_commands)
+    # Step 7: Deduplicate and attach frequency data
+    unique_commands = deduplicate_commands(parsed_expanded)
 
     # Add frequency to each unique command
     for cmd in unique_commands:
@@ -348,7 +405,7 @@ def run_extraction_pipeline(
     else:
         print(f"\n{len(unique_commands)} unique commands")
 
-    # Step 6: Analyze commands
+    # Step 8: Analyze commands
     print("\nAnalyzing commands...")
     analysis = analyze_commands(unique_commands)
 
@@ -357,15 +414,16 @@ def run_extraction_pipeline(
     analysis['base_command_frequency'] = dict(base_cmd_frequency)
     analysis['top_commands'] = cmd_frequency.most_common(20)
     analysis['top_base_commands'] = base_cmd_frequency.most_common(20)
+    analysis['operators_used'] = dict(operator_frequency)
     print(f"  -> Generated analysis with {len(analysis.get('categories', {}))} categories")
 
-    # Step 6: Generate quizzes
+    # Step 9: Generate quizzes
     print("\nGenerating quizzes...")
     quizzes = generate_quizzes(unique_commands, analysis)
     quiz_count = sum(len(q) for q in quizzes.values()) if isinstance(quizzes, dict) else len(quizzes)
     print(f"  -> Generated {quiz_count} quiz questions")
 
-    # Step 7: Generate HTML
+    # Step 10: Generate HTML
     print("\nGenerating HTML output...")
     html_files = generate_html(unique_commands, analysis, quizzes, output_dir)
     print(f"  -> Created {len(html_files)} HTML files")
@@ -375,7 +433,7 @@ def run_extraction_pipeline(
         "metadata": {
             "generated_at": datetime.now().isoformat(),
             "run_id": output_dir.name,
-            "version": "1.0.4",
+            "version": VERSION,
         },
         "input": {
             "sessions_processed": len(sessions),
@@ -399,6 +457,7 @@ def run_extraction_pipeline(
                 {"command": cmd, "count": count}
                 for cmd, count in list(base_cmd_frequency.most_common(10))
             ],
+            "operators_used": dict(operator_frequency),
             "complexity_distribution": dict(analysis.get('complexity_distribution', {})),
         },
         "output": {
@@ -414,6 +473,96 @@ def run_extraction_pipeline(
     print(f"\nSummary written to: {summary_path}")
 
     return True, f"Successfully generated learning materials in {output_dir}"
+
+
+def extract_sub_commands(cmd_str: str) -> List[str]:
+    """
+    Extract individual sub-commands from a compound command.
+
+    Splits commands by ||, &&, |, and ; while respecting quoting
+    and skipping inline code commands (python -c, node -e, bash -c).
+
+    Args:
+        cmd_str: The compound command string
+
+    Returns:
+        List of individual sub-command strings
+    """
+    import re
+
+    if not cmd_str or not cmd_str.strip():
+        return []
+
+    # Don't split commands that contain inline code - the ; and | inside
+    # quoted code would produce garbage fragments
+    inline_patterns = [' -c "', " -c '", ' -c $', ' -e "', " -e '", ' -e $',
+                       ' -c\n', ' -c\r']
+    first_token = cmd_str.split()[0] if cmd_str.split() else ''
+    if first_token in ('python', 'python3', 'node', 'bash', 'sh', 'ruby', 'perl'):
+        for pat in inline_patterns:
+            if pat in cmd_str:
+                return [cmd_str.strip()]
+
+    # Quote-aware splitting: track quote depth to avoid splitting inside quotes
+    sub_commands = []
+    current = []
+    in_single = False
+    in_double = False
+    i = 0
+    chars = cmd_str
+
+    while i < len(chars):
+        c = chars[i]
+
+        # Track quoting state
+        if c == "'" and not in_double:
+            in_single = not in_single
+            current.append(c)
+            i += 1
+        elif c == '"' and not in_single:
+            in_double = not in_double
+            current.append(c)
+            i += 1
+        elif not in_single and not in_double:
+            # Check for compound operators outside quotes
+            remaining = chars[i:]
+            if remaining.startswith('&&'):
+                cmd = ''.join(current).strip()
+                if cmd:
+                    sub_commands.append(cmd)
+                current = []
+                i += 2
+            elif remaining.startswith('||'):
+                cmd = ''.join(current).strip()
+                if cmd:
+                    sub_commands.append(cmd)
+                current = []
+                i += 2
+            elif c == ';':
+                cmd = ''.join(current).strip()
+                if cmd:
+                    sub_commands.append(cmd)
+                current = []
+                i += 1
+            elif c == '|' and not remaining.startswith('||'):
+                cmd = ''.join(current).strip()
+                if cmd:
+                    sub_commands.append(cmd)
+                current = []
+                i += 1
+            else:
+                current.append(c)
+                i += 1
+        else:
+            current.append(c)
+            i += 1
+
+    # Add final segment
+    cmd = ''.join(current).strip()
+    if cmd:
+        sub_commands.append(cmd)
+
+    return sub_commands
 
 
 def deduplicate_commands(commands: List[Dict]) -> List[Dict]:

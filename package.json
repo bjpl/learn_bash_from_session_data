@@ -1,7 +1,7 @@
 {
   "name": "learn_bash_from_session_data",
-  "version": "1.0.4",
-  "description": "Learn bash from your Claude Code sessions - extracts commands and generates interactive HTML lessons",
+  "version": "1.1.0",
+  "description": "Learn bash from your Claude Code sessions - extracts commands and generates interactive HTML lessons with 400+ commands, quizzes, and comprehensive coverage",
   "main": "bin/learn-bash.js",
   "bin": {
     "learn-bash": "bin/learn-bash.js",
@@ -16,13 +16,24 @@
     "claude",
     "cli",
     "terminal",
-    "shell"
+    "shell",
+    "quiz",
+    "commands",
+    "interactive",
+    "education"
   ],
   "author": "",
   "license": "MIT",
   "engines": {
     "node": ">=14.0.0"
   },
+  "files": [
+    "bin/",
+    "scripts/*.py",
+    "scripts/__init__.py",
+    "README.md",
+    "LICENSE"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bjpl/learn_bash_from_session_data.git"

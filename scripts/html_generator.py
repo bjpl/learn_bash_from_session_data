@@ -12,6 +12,16 @@ from pathlib import Path
 import html
 import json
 
+try:
+    from scripts.knowledge_base import COMMAND_DB, get_flags_for_command, get_command_info
+except ImportError:
+    try:
+        from knowledge_base import COMMAND_DB, get_flags_for_command, get_command_info
+    except ImportError:
+        COMMAND_DB = {}
+        def get_flags_for_command(cmd): return {}
+        def get_command_info(cmd): return None
+
 
 def _generate_html_impl(analysis_result: dict[str, Any], quizzes: list[dict[str, Any]]) -> str:
     """
@@ -114,19 +124,53 @@ def _generate_html_impl(analysis_result: dict[str, Any], quizzes: list[dict[str,
 </html>'''
 
 
+def _generate_operators_html(operators_used: dict, operator_descriptions: dict) -> str:
+    """Generate HTML for the operators used section."""
+    if not operators_used:
+        return '<p class="empty-state">No bash operators detected in these commands</p>'
+
+    operators_html = ""
+    # Sort by count descending
+    sorted_ops = sorted(operators_used.items(), key=lambda x: -x[1])
+    max_count = sorted_ops[0][1] if sorted_ops else 1
+
+    for op, count in sorted_ops:
+        name, desc = operator_descriptions.get(op, (op, 'Bash operator'))
+        bar_width = (count / max_count) * 100
+        operators_html += f'''
+                                <div class="operator-item">
+                                    <div class="operator-symbol"><code>{html.escape(op)}</code></div>
+                                    <div class="operator-info">
+                                        <div class="operator-name">{html.escape(name)}</div>
+                                        <div class="operator-desc">{html.escape(desc)}</div>
+                                    </div>
+                                    <div class="operator-bar-container">
+                                        <div class="operator-bar" style="width: {bar_width}%"></div>
+                                    </div>
+                                    <div class="operator-count">{count}</div>
+                                </div>'''
+    return operators_html
+
+
 def render_overview_tab(stats: dict[str, Any], commands: list[dict], categories: dict) -> str:
     """Render the overview/dashboard tab content."""
     total_commands = stats.get("total_commands", 0)
     unique_commands = stats.get("unique_commands", 0)
     unique_utilities = stats.get("unique_utilities", 0)
     date_range = stats.get("date_range", {"start": "N/A", "end": "N/A"})
-    complexity_dist = stats.get("complexity_distribution", {"simple": 0, "intermediate": 0, "advanced": 0})
 
-    # Calculate percentages for complexity bars
-    total_for_pct = sum(complexity_dist.values()) or 1
-    simple_pct = (complexity_dist.get("simple", 0) / total_for_pct) * 100
-    intermediate_pct = (complexity_dist.get("intermediate", 0) / total_for_pct) * 100
-    advanced_pct = (complexity_dist.get("advanced", 0) / total_for_pct) * 100
+    # Get operators data for the "Bash Operators Used" section
+    operators_used = stats.get("operators_used", {})
+    operator_descriptions = {
+        '|': ('Pipe', 'Sends output of one command to input of another'),
+        '||': ('OR operator', 'Run next command if previous failed'),
+        '&&': ('AND operator', 'Run next command if previous succeeded'),
+        '2>&1': ('Redirect stderr', 'Combines error output with standard output'),
+        '2>/dev/null': ('Suppress errors', 'Discards error messages'),
+        '>': ('Redirect output', 'Writes output to a file (overwrites)'),
+        '>>': ('Append output', 'Appends output to a file'),
+        '<': ('Redirect input', 'Reads input from a file'),
+    }
 
     # Top 10 commands by frequency - use pre-computed data if available
     top_commands_data = stats.get("top_commands", [])
@@ -237,29 +281,9 @@ def render_overview_tab(stats: dict[str, Any], commands: list[dict], categories:
 
                     <div class="charts-row">
                         <div class="chart-card">
-                            <h3>Complexity Distribution</h3>
-                            <div class="complexity-bars">
-                                <div class="complexity-row">
-                                    <span class="complexity-label simple">Simple</span>
-                                    <div class="complexity-bar-bg">
-                                        <div class="complexity-bar simple" style="width: {simple_pct}%"></div>
-                                    </div>
-                                    <span class="complexity-count">{complexity_dist.get("simple", 0)}</span>
-                                </div>
-                                <div class="complexity-row">
-                                    <span class="complexity-label intermediate">Intermediate</span>
-                                    <div class="complexity-bar-bg">
-                                        <div class="complexity-bar intermediate" style="width: {intermediate_pct}%"></div>
-                                    </div>
-                                    <span class="complexity-count">{complexity_dist.get("intermediate", 0)}</span>
-                                </div>
-                                <div class="complexity-row">
-                                    <span class="complexity-label advanced">Advanced</span>
-                                    <div class="complexity-bar-bg">
-                                        <div class="complexity-bar advanced" style="width: {advanced_pct}%"></div>
-                                    </div>
-                                    <span class="complexity-count">{complexity_dist.get("advanced", 0)}</span>
-                                </div>
+                            <h3>Bash Operators Used</h3>
+                            <div class="operators-list">
+                                {_generate_operators_html(operators_used, operator_descriptions)}
                             </div>
                         </div>
 
@@ -289,6 +313,7 @@ def render_overview_tab(stats: dict[str, Any], commands: list[dict], categories:
                             </div>
                         </div>
                     </div>
+
                 </div>'''
 
 
@@ -363,7 +388,7 @@ def render_commands_tab(commands: list[dict]) -> str:
         # Syntax highlighted command
         highlighted = _syntax_highlight(cmd.get("full_command", ""))
 
-        # Flags breakdown
+        # Flags breakdown with descriptions
         flags = cmd.get("flags", [])
         flags_html = ""
         if flags:
@@ -371,8 +396,26 @@ def render_commands_tab(commands: list[dict]) -> str:
             for flag in flags:
                 flag_name = html.escape(flag.get("flag", ""))
                 flag_desc = html.escape(flag.get("description", ""))
-                flags_html += f'<li><code class="flag">{flag_name}</code> - {flag_desc}</li>'
+                if flag_desc:
+                    flags_html += f'<li><code class="flag">{flag_name}</code> <span class="flag-desc">{flag_desc}</span></li>'
+                else:
+                    flags_html += f'<li><code class="flag">{flag_name}</code></li>'
             flags_html += '</ul></div>'
+
+        # Subcommand description
+        subcommand_desc = cmd.get("subcommand_desc", "")
+        subcmd_html = ""
+        if subcommand_desc:
+            subcmd_html = f'<div class="subcmd-section"><span class="subcmd-label">Subcommand:</span> {html.escape(subcommand_desc)}</div>'
+
+        # Common patterns / examples from knowledge base
+        common_patterns = cmd.get("common_patterns", [])
+        patterns_html = ""
+        if common_patterns:
+            patterns_html = '<div class="patterns-section"><h5>Common Patterns:</h5><ul class="patterns-list">'
+            for pattern in common_patterns[:5]:
+                patterns_html += f'<li><code>{html.escape(pattern)}</code></li>'
+            patterns_html += '</ul></div>'
 
         # Output preview
         output_preview = cmd.get("output_preview", "")
@@ -384,16 +427,47 @@ def render_commands_tab(commands: list[dict]) -> str:
                                 <pre class="output-preview">{html.escape(output_preview)}</pre>
                             </div>'''
 
+        # Use cases from knowledge base
+        use_cases = cmd.get("use_cases", [])
+        use_cases_html = ""
+        if use_cases:
+            use_cases_html = '<div class="use-cases-section"><h5>Use Cases:</h5><ul class="use-cases-list">'
+            for uc in use_cases[:3]:
+                use_cases_html += f'<li>{html.escape(uc)}</li>'
+            use_cases_html += '</ul></div>'
+
+        # Gotchas / pitfalls from knowledge base
+        gotchas = cmd.get("gotchas", [])
+        gotchas_html = ""
+        if gotchas:
+            gotchas_html = '<div class="gotchas-section"><h5>Common Pitfalls:</h5><ul class="gotchas-list">'
+            for g in gotchas[:2]:
+                gotchas_html += f'<li>{html.escape(g)}</li>'
+            gotchas_html += '</ul></div>'
+
+        # Related commands
+        related = cmd.get("related", [])
+        related_html = ""
+        if related:
+            related_chips = ' '.join(f'<code class="related-cmd">{html.escape(r)}</code>' for r in related[:5])
+            related_html = f'<div class="related-section"><h5>Related:</h5> {related_chips}</div>'
+
+        # Man page / documentation link
+        man_url = cmd.get("man_url", "")
+        man_link_html = ""
+        if man_url:
+            man_link_html = f'<a class="man-link" href="{html.escape(man_url)}" target="_blank" rel="noopener noreferrer" title="Documentation">docs</a>'
+
         commands_html += f'''
-                        <div class="command-card" data-category="{category}" data-complexity="{complexity}" data-frequency="{frequency}" data-name="{base_cmd}">
+                        <div class="command-card" data-category="{category}" data-frequency="{frequency}" data-name="{base_cmd}">
                             <div class="command-header" onclick="toggleCommand('{cmd_id}')">
                                 <div class="command-main">
                                     <code class="cmd">{base_cmd}</code>
-                                    <span class="complexity-badge {complexity}">{complexity}</span>
                                     <span class="category-badge">{category}</span>
+                                    {man_link_html}
                                 </div>
                                 <div class="command-meta">
-                                    <span class="frequency">Used {frequency}x</span>
+                                    <span class="cmd-preview">{' '.join(description.split())[:60]}{'...' if len(' '.join(description.split())) > 60 else ''}</span>
                                     <span class="expand-icon">&#9660;</span>
                                 </div>
                             </div>
@@ -406,7 +480,12 @@ def render_commands_tab(commands: list[dict]) -> str:
                                     <h5>Description:</h5>
                                     <p>{description}</p>
                                 </div>
+                                {subcmd_html}
                                 {flags_html}
+                                {use_cases_html}
+                                {gotchas_html}
+                                {patterns_html}
+                                {related_html}
                                 {output_html}
                             </div>
                         </div>'''
@@ -500,14 +579,59 @@ def render_lessons_tab(categories: dict, commands: list[dict]) -> str:
             complexity = cmd.get("complexity", "simple")
             highlighted = _syntax_highlight(cmd.get("full_command", ""))
 
+            # Get flags and patterns for this command from COMMAND_DB
+            cmd_flags = cmd.get("flags", [])
+            lesson_flags_html = ""
+            if cmd_flags:
+                lesson_flags_html = '<div class="lesson-flags"><strong>Flags used:</strong> '
+                flag_parts = []
+                for flag in cmd_flags:
+                    fname = html.escape(flag.get("flag", "") if isinstance(flag, dict) else str(flag))
+                    fdesc = html.escape(flag.get("description", "") if isinstance(flag, dict) else "")
+                    if fdesc:
+                        flag_parts.append(f'<code class="flag">{fname}</code> ({fdesc})')
+                    else:
+                        flag_parts.append(f'<code class="flag">{fname}</code>')
+                lesson_flags_html += ', '.join(flag_parts) + '</div>'
+
+            # Subcommand info
+            subcmd_desc = cmd.get("subcommand_desc", "")
+            lesson_subcmd = ""
+            if subcmd_desc:
+                lesson_subcmd = f'<div class="lesson-subcmd"><em>{html.escape(subcmd_desc)}</em></div>'
+
+            # Use cases and gotchas from COMMAND_DB for lessons
+            lesson_use_cases = ""
+            cmd_db_info = COMMAND_DB.get(base_cmd.replace("&amp;", "&"), {})
+            uc_list = cmd_db_info.get("use_cases", [])
+            if uc_list:
+                uc_items = ''.join(f'<li>{html.escape(uc)}</li>' for uc in uc_list[:2])
+                lesson_use_cases = f'<div class="lesson-use-cases"><strong>When to use:</strong><ul>{uc_items}</ul></div>'
+
+            lesson_gotchas = ""
+            gotcha_list = cmd_db_info.get("gotchas", [])
+            if gotcha_list:
+                g_items = ''.join(f'<li>{html.escape(g)}</li>' for g in gotcha_list[:1])
+                lesson_gotchas = f'<div class="lesson-gotchas"><strong>Watch out:</strong><ul>{g_items}</ul></div>'
+
+            lesson_man_url = ""
+            man_link = cmd_db_info.get("man_url", "")
+            if man_link:
+                lesson_man_url = f'<a class="man-link" href="{html.escape(man_link)}" target="_blank" rel="noopener noreferrer">docs</a>'
+
             cat_commands_html += f'''
                             <div class="lesson-command">
                                 <div class="lesson-command-header">
                                     <code class="cmd">{base_cmd}</code>
-                                    <span class="complexity-badge {complexity}">{complexity}</span>
+                                    <span class="lesson-complexity complexity-{complexity}">{complexity}</span>
+                                    {lesson_man_url}
                                 </div>
                                 <pre class="syntax-highlighted">{highlighted}</pre>
                                 <p class="lesson-description">{description}</p>
+                                {lesson_subcmd}
+                                {lesson_flags_html}
+                                {lesson_use_cases}
+                                {lesson_gotchas}
                             </div>'''
 
         # Patterns observed
@@ -518,6 +642,23 @@ def render_lessons_tab(categories: dict, commands: list[dict]) -> str:
             for pattern in patterns:
                 patterns_html += f'<li>{html.escape(pattern)}</li>'
             patterns_html += '</ul></div>'
+
+        # Collect related commands across this category for cross-reference
+        related_set = set()
+        cat_base_cmds = {c.get("base_command", "") for c in cat_cmd_data}
+        for cmd_item in cat_cmd_data:
+            bc = cmd_item.get("base_command", "").replace("&amp;", "&")
+            cmd_db_info = COMMAND_DB.get(bc, {})
+            for rel in cmd_db_info.get("related", []):
+                if rel not in cat_base_cmds:
+                    related_set.add(rel)
+        related_html = ""
+        if related_set:
+            related_chips = ' '.join(
+                f'<code class="related-cmd">{html.escape(r)}</code>'
+                for r in sorted(related_set)[:12]
+            )
+            related_html = f'<div class="lesson-related-section"><h4>Explore Related Commands:</h4><div class="related-chips">{related_chips}</div></div>'
 
         lessons_html += f'''
                     <div class="lesson-section">
@@ -536,6 +677,7 @@ def render_lessons_tab(categories: dict, commands: list[dict]) -> str:
                                 {cat_commands_html}
                             </div>
                             {patterns_html}
+                            {related_html}
                         </div>
                     </div>'''
 
@@ -548,20 +690,17 @@ def render_lessons_tab(categories: dict, commands: list[dict]) -> str:
 def _get_category_concept(category: str) -> str:
     """Get concept overview for a category."""
     concepts = {
-        "File Management": "Commands for creating, copying, moving, deleting, and organizing files and directories in the filesystem.",
-        "Text Processing": "Tools for searching, filtering, transforming, and manipulating text content in files and streams.",
-        "System Administration": "Commands for managing system resources, processes, users, and system configuration.",
-        "Network": "Utilities for network communication, file transfer, and connectivity diagnostics.",
-        "Package Management": "Tools for installing, updating, and managing software packages on the system.",
-        "Version Control": "Git and other version control commands for tracking changes and collaborating on code.",
-        "Process Management": "Commands for viewing, controlling, and managing running processes.",
-        "User Management": "Tools for managing user accounts, permissions, and access control.",
-        "Disk Management": "Utilities for managing disk space, partitions, and storage devices.",
-        "Shell Scripting": "Built-in shell commands and constructs for scripting and automation.",
-        "Development": "Programming tools, compilers, interpreters, and development utilities.",
-        "Compression": "Tools for compressing, archiving, and extracting files.",
-        "Search": "Commands for finding files, searching content, and locating resources.",
-        "Permissions": "Tools for managing file permissions, ownership, and access control.",
+        "File System": "Commands for navigating, viewing, creating, and managing files and directories in the filesystem.",
+        "Text Processing": "Tools for viewing, searching, filtering, and transforming text content in files and streams.",
+        "Git": "Version control system commands for tracking changes, managing branches, and collaborating on code.",
+        "Package Management": "Package managers for installing, updating, and managing software dependencies across languages and platforms.",
+        "Process & System": "Commands for monitoring, managing, and controlling running processes and system resources.",
+        "Networking": "Commands for network operations, file transfers, remote access, and connectivity diagnostics.",
+        "Permissions": "Commands for managing file ownership, access permissions, and user/group administration.",
+        "Compression": "Commands for compressing, archiving, and extracting files using various algorithms.",
+        "Search & Navigation": "Commands for finding files, searching content, and navigating the filesystem efficiently.",
+        "Development": "Development tools for building, testing, compiling, and running code across languages.",
+        "Shell Builtins": "Built-in shell commands for scripting, variable management, and interactive shell use.",
     }
     return concepts.get(category, f"Commands related to {category.lower()} operations and utilities.")
 
@@ -569,20 +708,17 @@ def _get_category_concept(category: str) -> str:
 def _get_category_icon(category: str) -> str:
     """Get icon for a category."""
     icons = {
-        "File Management": "&#128193;",
+        "File System": "&#128193;",
         "Text Processing": "&#128196;",
-        "System Administration": "&#9881;",
-        "Network": "&#127760;",
+        "Git": "&#128202;",
         "Package Management": "&#128230;",
-        "Version Control": "&#128202;",
-        "Process Management": "&#9654;",
-        "User Management": "&#128100;",
-        "Disk Management": "&#128191;",
-        "Shell Scripting": "&#10095;",
-        "Development": "&#128187;",
-        "Compression": "&#128230;",
-        "Search": "&#128269;",
+        "Process & System": "&#9881;",
+        "Networking": "&#127760;",
         "Permissions": "&#128274;",
+        "Compression": "&#128230;",
+        "Search & Navigation": "&#128269;",
+        "Development": "&#128187;",
+        "Shell Builtins": "&#10095;",
     }
     return icons.get(category, "&#128204;")
 
@@ -637,6 +773,12 @@ def render_quiz_tab(quizzes: list[dict]) -> str:
         options = quiz.get("options", [])
         correct = quiz.get("correct_answer", 0)
         explanation = html.escape(quiz.get("explanation", ""))
+        q_man_url = quiz.get("man_url", "")
+
+        # Doc link for quiz context
+        q_meta_html = ""
+        if q_man_url:
+            q_meta_html = f'<div class="quiz-meta"><a class="man-link" href="{html.escape(q_man_url)}" target="_blank" rel="noopener noreferrer">docs</a></div>'
 
         options_html = ""
         for opt_idx, option in enumerate(options):
@@ -650,7 +792,10 @@ def render_quiz_tab(quizzes: list[dict]) -> str:
 
         questions_html += f'''
                     <div class="quiz-question" id="question-{q_id}">
-                        <div class="question-number">Question {idx + 1}</div>
+                        <div class="question-header">
+                            <div class="question-number">Question {idx + 1}</div>
+                            {q_meta_html}
+                        </div>
                         <div class="question-text">{question}</div>
                         <div class="quiz-options">
                             {options_html}
@@ -800,6 +945,17 @@ def get_inline_css() -> str:
         .dark-icon { display: none; }
         [data-theme="dark"] .light-icon { display: none; }
         [data-theme="dark"] .dark-icon { display: inline; }
+        [data-theme="dark"] .gotchas-section,
+        [data-theme="dark"] .lesson-gotchas { background: #3e2723; border-left-color: #ff8f00; }
+        [data-theme="dark"] .gotchas-list li,
+        [data-theme="dark"] .lesson-gotchas li { color: #ffcc80; }
+        [data-theme="dark"] .gotchas-section h5,
+        [data-theme="dark"] .lesson-gotchas strong { color: #ffb300; }
+        [data-theme="dark"] .use-cases-list li,
+        [data-theme="dark"] .lesson-use-cases li { color: #b0bec5; }
+        [data-theme="dark"] .related-cmd { background: #1a237e; color: #90caf9; }
+        [data-theme="dark"] .man-link { background: #0d47a1; color: #90caf9; }
+        [data-theme="dark"] .subcmd-section { background: #0d253f; border-left-color: #4a9eff; }
 
         /* Tabs */
         .tabs {
@@ -984,6 +1140,77 @@ def get_inline_css() -> str:
         .complexity-bar.advanced { background: var(--accent-danger); }
 
         .complexity-count {
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-align: right;
+            color: var(--text-secondary);
+        }
+
+        /* Operators List */
+        .operators-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .operator-item {
+            display: grid;
+            grid-template-columns: 80px 1fr 120px 50px;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .operator-item:last-child {
+            border-bottom: none;
+        }
+
+        .operator-symbol {
+            font-family: var(--font-mono);
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--accent-primary);
+        }
+
+        .operator-symbol code {
+            background: var(--bg-tertiary);
+            padding: 4px 8px;
+            border-radius: var(--radius-sm);
+        }
+
+        .operator-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .operator-name {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .operator-desc {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .operator-bar-container {
+            height: 20px;
+            background: var(--bg-tertiary);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+        }
+
+        .operator-bar {
+            height: 100%;
+            background: var(--accent-primary);
+            border-radius: var(--radius-sm);
+            transition: width 0.5s ease;
+        }
+
+        .operator-count {
             font-size: 0.9rem;
             font-weight: 600;
             text-align: right;
@@ -1228,9 +1455,13 @@ def get_inline_css() -> str:
             gap: 16px;
         }
 
-        .frequency {
-            font-size: 0.85rem;
+        .cmd-preview {
+            font-size: 0.8rem;
             color: var(--text-secondary);
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .expand-icon {
@@ -1307,6 +1538,55 @@ def get_inline_css() -> str:
         code.flag, .syntax-highlighted .flag {
             color: #34a853;
         }
+
+        .flag-desc { color: #6c757d; margin-left: 4px; }
+        .flags-list li { margin: 4px 0; line-height: 1.5; }
+        .subcmd-section { background: #f0f7ff; padding: 8px 12px; border-radius: 6px; margin: 8px 0; border-left: 3px solid #4a9eff; }
+        .subcmd-label { font-weight: 600; color: #4a9eff; }
+        .patterns-section { margin: 8px 0; }
+        .patterns-section h5 { margin: 4px 0; color: #666; font-size: 0.85em; }
+        .patterns-list { list-style: none; padding: 0; margin: 4px 0; }
+        .patterns-list li { padding: 3px 0; }
+        .patterns-list code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-size: 0.85em; }
+        .lesson-flags { margin: 6px 0; font-size: 0.9em; color: #555; }
+        .lesson-subcmd { font-size: 0.9em; color: #4a9eff; margin: 4px 0; }
+        .lesson-complexity { font-size: 0.75em; padding: 2px 8px; border-radius: 10px; margin-left: 8px; }
+        .complexity-simple { background: #e8f5e9; color: #2e7d32; }
+        .complexity-intermediate { background: #fff3e0; color: #e65100; }
+        .complexity-advanced { background: #fce4ec; color: #c62828; }
+
+        /* Enrichment: use cases */
+        .use-cases-section, .lesson-use-cases { margin: 8px 0; }
+        .use-cases-section h5, .lesson-use-cases strong { margin: 4px 0; color: #1a73e8; font-size: 0.85em; }
+        .use-cases-list { padding-left: 18px; margin: 4px 0; }
+        .use-cases-list li, .lesson-use-cases li { margin: 4px 0; line-height: 1.5; font-size: 0.9em; color: #444; }
+        .lesson-use-cases ul { padding-left: 18px; margin: 4px 0; list-style: disc; }
+        .lesson-use-cases li { font-size: 0.85em; color: #555; }
+
+        /* Enrichment: gotchas / pitfalls */
+        .gotchas-section, .lesson-gotchas { margin: 8px 0; background: #fff8e1; padding: 8px 12px; border-radius: 6px; border-left: 3px solid #f9a825; }
+        .gotchas-section h5, .lesson-gotchas strong { margin: 4px 0; color: #f57f17; font-size: 0.85em; }
+        .gotchas-list { padding-left: 18px; margin: 4px 0; }
+        .gotchas-list li, .lesson-gotchas li { margin: 4px 0; line-height: 1.5; font-size: 0.9em; color: #5d4037; }
+        .lesson-gotchas ul { padding-left: 18px; margin: 4px 0; list-style: disc; }
+
+        /* Enrichment: related commands */
+        .related-section { margin: 8px 0; }
+        .related-section h5 { display: inline; margin-right: 6px; color: #666; font-size: 0.85em; }
+        .related-cmd { background: #e8eaf6; color: #3949ab; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; margin-right: 4px; cursor: default; }
+
+        /* Enrichment: man page link */
+        .man-link { font-size: 0.75em; padding: 2px 8px; border-radius: 10px; background: #e3f2fd; color: #1565c0; text-decoration: none; margin-left: 8px; font-weight: 500; }
+        .man-link:hover { background: #bbdefb; text-decoration: none; }
+
+        /* Quiz enrichment */
+        .question-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .quiz-meta { display: flex; gap: 6px; align-items: center; }
+
+        /* Lesson related commands */
+        .lesson-related-section { margin: 16px 0 8px; padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-md); border: 1px solid var(--border-color); }
+        .lesson-related-section h4 { font-size: 0.9em; color: var(--text-secondary); margin-bottom: 8px; }
+        .related-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 
         .syntax-highlighted .string {
             color: #ff6d01;
@@ -2031,28 +2311,209 @@ def generate_html_files(
     # Transform commands to expected format
     formatted_commands = []
     for cmd in analyzed_commands:
-        # Convert flags to expected format (list of dicts with 'flag' and 'description')
-        raw_flags = cmd.get('flags', [])
-        formatted_flags = []
-        for f in raw_flags:
-            if isinstance(f, dict):
-                formatted_flags.append(f)
-            elif isinstance(f, str):
-                formatted_flags.append({'flag': f, 'description': ''})
-
         cmd_str = cmd.get('command', '')
+        base_cmd = cmd.get('base_command', cmd_str.split()[0] if cmd_str else '')
         complexity_score = cmd.get('complexity', 1)
 
+        # Filter out non-bash entries (Python/JS code fragments, single chars, status text)
+        if not base_cmd or len(base_cmd) < 2:
+            continue
+        # Skip entries that look like code fragments (contain parens, equals, dots as methods)
+        if any(c in base_cmd for c in ('(', ')', '=', '{', '}')) and not base_cmd.startswith('.'):
+            continue
+        # Skip entries with backslashes, quotes, or HTML entities (JSONL text fragments)
+        if any(c in base_cmd for c in ('\\', '"', "'")) or '&' in base_cmd:
+            continue
+        # Skip entries that are clearly not commands (capitalized status words, text fragments)
+        if base_cmd[0].isupper() and base_cmd.isalpha() and base_cmd not in ('PATH', 'HOME'):
+            continue
+        # Skip common text fragments that get misidentified as commands
+        junk_tokens = {'version', 'total', 'package', 'success', 'error', 'reading',
+                       'editing', 'done', 'warning', 'info', 'note', 'output',
+                       'task', 'goal', 'purpose', 'what', 'description'}
+        if base_cmd.lower() in junk_tokens:
+            continue
+
+        # Tokenize the command for subcommand/description generation
+        cmd_tokens = cmd_str.split() if cmd_str else []
+
+        # Look up COMMAND_DB info for this command
+        cmd_info = COMMAND_DB.get(base_cmd, {})
+        kb_flags = get_flags_for_command(base_cmd)
+
+        # Convert flags to expected format WITH descriptions from knowledge base
+        # Filter out non-flag tokens: bare dashes, numeric args (-5, -30), trailing colons
+        import re
+        raw_flags = cmd.get('flags', [])
+        formatted_flags = []
+        seen_flags = set()
+        for f in raw_flags:
+            flag_name = f.get('flag', '') if isinstance(f, dict) else f
+            # Skip bare dash, numeric-only flags (-5, -30), and artifact flags with colons
+            if not flag_name or flag_name == '-' or flag_name.endswith(':'):
+                continue
+            if re.match(r'^-\d+$', flag_name):
+                continue
+            # Deduplicate flags within same command
+            if flag_name in seen_flags:
+                continue
+            seen_flags.add(flag_name)
+
+            if isinstance(f, dict) and 'flag' in f:
+                flag_desc = f.get('description', '')
+                if not flag_desc and flag_name in kb_flags:
+                    flag_desc = kb_flags[flag_name]
+                formatted_flags.append({'flag': flag_name, 'description': flag_desc})
+            elif isinstance(f, str):
+                flag_desc = kb_flags.get(f, '')
+                # For combined flags like -la, decompose into individual flags
+                if not flag_desc and len(f) > 2 and f.startswith('-') and not f.startswith('--'):
+                    char_descs = []
+                    for char in f[1:]:
+                        single = f'-{char}'
+                        if single in kb_flags:
+                            char_descs.append(f'{single}: {kb_flags[single]}')
+                    if char_descs:
+                        flag_desc = '; '.join(char_descs)
+                # For find-style flags (-name, -type, -path, -maxdepth), add descriptions
+                if not flag_desc:
+                    find_flags = {
+                        '-name': 'Match files by name pattern',
+                        '-type': 'Filter by file type (f=file, d=directory)',
+                        '-path': 'Match files by path pattern',
+                        '-maxdepth': 'Limit directory recursion depth',
+                        '-mindepth': 'Set minimum directory depth',
+                        '-exec': 'Execute command on each match',
+                        '-not': 'Negate the following expression',
+                        '-size': 'Match files by size',
+                        '-mtime': 'Match by modification time',
+                        '-perm': 'Match by file permissions',
+                        '-ls': 'List matched files in ls -l format',
+                        '-delete': 'Delete matched files',
+                        '-print': 'Print matched file paths',
+                    }
+                    flag_desc = find_flags.get(f, '')
+                # For common CLI flags without KB entries
+                if not flag_desc:
+                    common_flags = {
+                        '--help': 'Show help and usage information',
+                        '--version': 'Show version number',
+                        '--verbose': 'Enable verbose output',
+                        '--dry-run': 'Preview changes without executing',
+                        '--output': 'Specify output file or directory',
+                        '--open': 'Open result in default application',
+                        '--stat': 'Show diffstat summary of changes',
+                        '--sessions': 'Number of sessions to process',
+                        '--title': 'Set custom title',
+                        '--no-open': 'Skip auto-opening in browser',
+                        '--from': 'Specify input source path',
+                        '-s': 'Silent/short output mode',
+                        '-n': 'Numeric/count or line number',
+                        '-c': 'Execute command string or count',
+                        '-g': 'Global scope',
+                        '-p': 'Preserve attributes or port',
+                        '-o': 'Output file',
+                    }
+                    flag_desc = common_flags.get(f, '')
+                formatted_flags.append({'flag': f, 'description': flag_desc})
+
+        # Generate a contextual description that differentiates commands with the same base
+        session_desc = cmd.get('description', '')
+        kb_desc = cmd_info.get('description', '')
+
+        # Build a specific description from the actual command content
+        args_list = cmd.get('args', [])
+        flag_list = [fl.get('flag', '') if isinstance(fl, dict) else str(fl) for fl in formatted_flags]
+        contextual_desc = ''
+
+        # For inline code execution (python -c, bash -c), summarize the code snippet
+        if base_cmd in ('python', 'python3', 'bash', 'sh', 'node') and '-c' in flag_list:
+            # Extract the inline code from the full command after -c
+            c_idx = cmd_str.find('-c')
+            if c_idx >= 0:
+                raw_code = cmd_str[c_idx + 2:].strip().strip('"').strip("'")
+                # Split on actual newlines before collapsing
+                code_lines = [l.strip() for l in raw_code.splitlines() if l.strip()]
+                # Find first non-import line for a distinctive preview
+                action_lines = [l for l in code_lines if not l.startswith(('import ', 'from ', '#'))]
+                if action_lines:
+                    code_part = ' '.join(action_lines[0].split())[:60]
+                elif code_lines:
+                    # All imports - show what's being imported
+                    code_part = ' '.join(code_lines[0].split())[:60]
+                else:
+                    code_part = ''
+                if code_part:
+                    contextual_desc = f"{base_cmd} -c: {code_part}{'...' if len(code_part) >= 60 else ''}"
+
+        # For commands with subcommands (git, npm, docker, etc.), use subcommand context
+        if not contextual_desc and cmd_tokens and len(cmd_tokens) > 1:
+            subcmd_token = next((t for t in cmd_tokens[1:] if not t.startswith('-') and not t.startswith('"') and not t.startswith("'")), '')
+            if subcmd_token and subcmd_token != base_cmd:
+                subcmd_info = cmd_info.get('subcommands', {}).get(subcmd_token, '')
+                if subcmd_info:
+                    contextual_desc = f"{base_cmd} {subcmd_token}: {subcmd_info}"
+                else:
+                    contextual_desc = f"{base_cmd} {subcmd_token}"
+                # Add meaningful args (skip very long ones, quotes, code)
+                short_args = [a for a in args_list if len(str(a)) < 40 and a != subcmd_token and not a.startswith('"')]
+                if short_args:
+                    contextual_desc += f" ({', '.join(short_args[:3])})"
+
+        # For commands with flags but no subcommand, describe with flags
+        if not contextual_desc and flag_list:
+            flag_summary = ', '.join(flag_list[:3])
+            short_args = [a for a in args_list if len(str(a)) < 40]
+            if short_args:
+                contextual_desc = f"{base_cmd} {flag_summary} on {', '.join(short_args[:2])}"
+            else:
+                contextual_desc = f"{base_cmd} with {flag_summary}"
+
+        # For simple commands with just args
+        if not contextual_desc and args_list:
+            short_args = [a for a in args_list if len(str(a)) < 40]
+            if short_args:
+                contextual_desc = f"{base_cmd} {' '.join(short_args[:3])}"
+
+        # Priority: contextual > knowledge base > generic fallback
+        # Session descriptions (from JSONL) describe Claude's task, NOT the command
+        if contextual_desc:
+            description = contextual_desc
+        elif kb_desc:
+            description = kb_desc
+        else:
+            description = f"Run {base_cmd} command"
+
+        # Get subcommand info (for commands like git, docker, npm)
+        subcommands = cmd_info.get('subcommands', {})
+        subcommand_desc = ''
+        if subcommands and len(cmd_tokens) > 1:
+            for token in cmd_tokens[1:]:
+                if not token.startswith('-') and token in subcommands:
+                    subcommand_desc = subcommands[token]
+                    break
+
+        # Get common patterns from COMMAND_DB
+        common_patterns = cmd_info.get('common_patterns', [])
+
         formatted_commands.append({
-            'base_command': cmd.get('base_command', cmd_str.split()[0] if cmd_str else ''),
+            'base_command': base_cmd,
             'full_command': cmd_str,
             'category': cmd.get('category', 'Other'),
             'complexity': complexity_to_label(complexity_score),
             'complexity_score': complexity_score,
             'frequency': frequency_map.get(cmd_str, 1),
-            'description': cmd.get('description', ''),
+            'description': description,
             'flags': formatted_flags,
+            'subcommand_desc': subcommand_desc,
+            'common_patterns': common_patterns[:6],
+            'args': cmd.get('args', []),
             'is_new': False,
+            'man_url': cmd_info.get('man_url', ''),
+            'use_cases': cmd_info.get('use_cases', []),
+            'gotchas': cmd_info.get('gotchas', []),
+            'related': cmd_info.get('related', []),
+            'difficulty': cmd_info.get('difficulty', ''),
         })
 
     # Transform complexity distribution from numeric keys to string labels
@@ -2081,6 +2542,7 @@ def generate_html_files(
             'complexity_avg': stats.get('average_complexity', 2),
             'complexity_distribution': complexity_distribution,
             'top_commands': top_10_commands,  # Pre-computed top commands with frequencies
+            'operators_used': analysis.get('operators_used', {}),  # Bash operators like ||, &&, |, 2>&1
         },
         'commands': formatted_commands,
         'categories': {cat: [c.get('command', '') for c in cmds] for cat, cmds in categories.items()},
@@ -2103,11 +2565,19 @@ def generate_html_files(
             else:
                 option_texts.append(str(opt))
 
+        # Extract base command from command_context for enrichment lookup
+        cmd_ctx = quiz.get('command_context', '')
+        base_cmd = cmd_ctx.split()[0] if cmd_ctx else ''
+        q_cmd_info = COMMAND_DB.get(base_cmd, {})
+
         formatted_quizzes.append({
             'question': quiz.get('question', ''),
             'options': option_texts,
             'correct_answer': correct_idx,
             'explanation': quiz.get('explanation', ''),
+            'difficulty': q_cmd_info.get('difficulty', ''),
+            'man_url': q_cmd_info.get('man_url', ''),
+            'base_command': base_cmd,
         })
 
     # Generate HTML
